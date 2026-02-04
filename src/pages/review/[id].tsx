@@ -14,6 +14,7 @@ import {
   Loader2,
   Mail,
   MoreHorizontal,
+  PlusIcon,
   Share2,
   SheetIcon,
   X,
@@ -22,6 +23,8 @@ import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { Deliverable, Deliverables } from "@/components/review/deliverables";
+import { demoDeliverables } from "@/lib/demo";
+import { demoTask } from "@/lib/tenant";
 
 type TaskStatus = "review" | "success" | "in_progress" | "error";
 type StepStatus = "done" | "pending_review" | "running" | "todo" | "error";
@@ -40,122 +43,6 @@ type TodoItem = {
   status?: TodoStatus;
 };
 
-
-
-type TaskReviewModel = {
-  id: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  updatedLabel: string; // "Updated 49 minutes ago"
-  timeline: TimelineItem[];
-  todos: TodoItem[];
-  deliverables: Deliverable[];
-};
-
-const demoTask1: TaskReviewModel = {
-  id: "2049",
-  title: "Week Kickoff",
-  description:
-    "Strong MRR growth of 13–18% month-over-month with successful free tier discontinuation. Three-month strategy focuses on user reactivation, product launch, and establishing sustainable growth channels.",
-  status: "review",
-  updatedLabel: "Updated 49 minutes ago",
-  timeline: [
-    {
-      id: "t1",
-      text: "MRR growth reaches 12.5% ($1.3M) despite forex impact",
-      at: "Mar 24, 16:45",
-      status: "done",
-    },
-    {
-      id: "t2",
-      text: "Decision to phase out Personal plan and potentially Pro plan to focus on Business-only model",
-      at: "Mar 24, 16:45",
-      status: "done",
-    },
-    {
-      id: "t3",
-      text: "Weekly metrics show growing signups with 7.5% conversion rate",
-      at: "Mar 17, 17:00",
-      status: "done",
-    },
-    {
-      id: "t4",
-      text: "AI feature retention data: AI notes users retain at 66%, AI chat users at 92%",
-      at: "Mar 17, 17:00",
-      status: "done",
-    },
-    {
-      id: "t5",
-      text: "People Briefings feature finalized for rollout with phased launch strategy",
-      at: "Mar 10, 17:00",
-      status: "pending_review",
-    },
-    {
-      id: "t6",
-      text: "Current MRR reaches 1.15M EUR with 2% growth in March",
-      at: "Mar 3, 16:45",
-      status: "todo",
-    },
-  ],
-  todos: [
-    { id: "td1", text: "Order door hardware" , status: "not_started" },
-    { id: "td2", text: "Seal floor" , status: "in_progress" },
-    { id: "td3", text: "Tile test", status: "done" },
-    { id: "td4", text: "Wrap up last month bookkeeping" , status: "not_started" },
-    { id: "td5", text: "Book Berlin flight" , status: "not_started" },
-  ],
-  deliverables: [
-    {
-      kind: "email",
-      title: "Email",
-      meta: "Send email",
-      to: "team@amie.so",
-      subject: "product tier changes - important update",
-      body: "hey team\n\nwanted to share...\n\nthanks",
-    },
-    {
-      kind: "doc",
-      title: "Q3 Competitive Analysis",
-      meta: "Created",
-      previewTitle: "Executive Summary",
-      preview: "Q3 marked a significant shift...",
-      onOpen: () => {},
-    },
-    {
-      kind: "sheet",
-      title: "Pipeline Forecast",
-      meta: "Edited",
-      previewTitle: "Notes",
-      preview: "Updated assumptions for conversion and churn...",
-      onOpen: () => {},
-    },
-    {
-      kind: "file_change",
-      title: "File changes",
-      meta: "Edits",
-      summary: "Updated pricing copy and fixed layout regressions.",
-      diff: { plus: 24, minus: 11 },
-      files: [
-        { path: "src/app/pricing/page.tsx", note: "Copy + spacing" },
-        { path: "src/components/task-review/deliverables.tsx" },
-      ],
-      onOpen: () => {},
-    },
-    {
-      kind: "file",
-      title: "Competitor_Analysis_Q3.pdf",
-      meta: "Generated report",
-      size: "1.2 MB",
-      href: "/demo.pdf",
-      fileType: "pdf",
-    },
-  ],
-
-  };
-
-
-// --- example deliverables data (update demoTask.deliverables) ---
 
 
 
@@ -222,7 +109,7 @@ function Timeline({ items }: { items: TimelineItem[] }) {
               <div className="relative flex justify-center">
                 <span className="mt-[9px] h-2.5 w-2.5 rounded-full bg-neutral-300" />
                 {!last ? (
-                  <span className="absolute top-6 bottom-[-40px] w-px bg-neutral-200" />
+                  <span className="absolute top-6 bottom-[-40px] h-[50px] w-px bg-neutral-200" />
                 ) : null}
               </div>
 
@@ -244,7 +131,7 @@ function TodoMark({ status }: { status: TodoStatus }) {
     return (
       <span
         className={cn(
-          "grid h-[18px] w-[18px] shrink-0 place-items-center rounded-[6px] border bg-white p-[1.5px]",
+          "grid h-[22px] w-[22px] shrink-0 place-items-center rounded-[6px] border bg-white p-[1.5px]",
           status === "not_started" ? "border-neutral-300" : status === "in_progress" ? "border-sky-500" : "border-emerald-500"
         )}
       >
@@ -266,23 +153,26 @@ function TodoMark({ status }: { status: TodoStatus }) {
   function Todos({ items }: { items: TodoItem[] }) {
     return (
       <div className="mt-16">
-        <div className="text-sm font-medium text-neutral-400">Todos</div>
-  
-        <div className="mt-5 space-y-3">
+<div className="flex flex-row items-center justify-between"><div className="text-sm font-medium text-neutral-400">Todos</div>
+        <div className="text-sm font-medium text-neutral-400">
+            <PlusIcon className="h-4 w-4" />
+        </div>
+      </div>  
+        <div className="mt-5 space-y-5">
           {items.map((t) => {
             const status: TodoStatus = t.status ?? "not_started";
   
             return (
               <div
                 key={t.id}
-                className="flex items-center justify-between gap-6"
+                className="flex items-center justify-between gap-10"
               >
                 <div className="flex min-w-0 items-center gap-3">
                   <TodoMark status={status} />
   
                   <span
                     className={cn(
-                      "truncate text-[15px] leading-6",
+                      "truncate text-[17px] leading-6",
                       status === "done"
                         ? "text-neutral-400 line-through"
                         : "text-neutral-900"

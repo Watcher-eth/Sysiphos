@@ -6,11 +6,13 @@ import {
   Mail,
   FileText,
   Sheet as SheetIcon,
+  FileDiff,
   Code,
   ExternalLink,
+  PlusIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Separator } from "@/components/ui/separator";
+import { Button } from "../ui/button";
 
 /* ───────────────────────── Types ───────────────────────── */
 
@@ -18,49 +20,72 @@ export type Deliverable =
   | EmailDeliverable
   | DocDeliverable
   | SheetDeliverable
-  | FileChangeDeliverable;
+  | FileEditedDeliverable
+  | CodeChangeDeliverable;
 
-export type EmailDeliverable = {
+export type BaseDeliverable = {
+  onClose?: () => void;
+};
+
+export type EmailDeliverable = BaseDeliverable & {
   kind: "email";
-  title?: string; // default "Email"
+  headerLabel?: string; // default "Email"
   headerAction?: string; // default "Send email"
   to?: string;
   subject?: string;
   body?: string;
-  onClose?: () => void;
 };
 
-export type DocDeliverable = {
-  kind: "doc";
-  title: string;
-  headerAction?: string; // "Open"
-  meta?: string; // "Created" / "Edited"
-  previewTitle?: string;
-  previewText?: string;
-  previewImageUrl?: string; // if you have a real screenshot/thumbnail
-  onOpen?: () => void;
-  onClose?: () => void;
+
+
+export type SheetChangeSummary = {
+  rowsAdded?: number;
+  rowsEdited?: number;
+  rowsDeleted?: number;
+  formulasAdded?: number;
+  formulasEdited?: number;
+  formulasDeleted?: number;
+  dataNotes?: string[]; // e.g. "Used March CRM export", "Normalized currency columns"
 };
 
-export type SheetDeliverable = {
+export type SheetDeliverable = BaseDeliverable & {
   kind: "sheet";
+  headerLabel?: string; // default "Spreadsheet"
+  headerAction?: string; // default "Open sheet"
   title: string;
-  headerAction?: string; // "Open sheet"
   meta?: string; // "Created" / "Edited"
+  summary?: SheetChangeSummary;
   columns: string[];
   rows: Array<Array<string | number>>;
   onOpen?: () => void;
-  onClose?: () => void;
 };
 
-export type FileChangeDeliverable = {
-  kind: "file_change";
-  title: string; // e.g. "ComparePageClient.tsx"
-  headerAction?: string; // "View changes"
-  meta?: string; // e.g. "Edited"
-  language?: string; // optional label
+export type FileEditedDeliverable = BaseDeliverable & {
+    kind: "file_edited";
+    headerLabel?: string; // default "File"
+    headerAction?: string; // default "Open"
+    title: string; // e.g. "Brand_Guidelines.pdf"
+    meta?: string; // "Edited" / "Updated"
+    fileType?: "pdf" | "doc" | "image" | "other";
+    changeSummary?: string; // one-liner
+    changes: string[]; // bullets describing edits
+  
+    // Reuse the SAME document preview component for before/after.
+    beforeDoc?: DocDeliverable;
+    afterDoc?: DocDeliverable;
+  
+    onOpen?: () => void;
+  };
+
+export type CodeChangeDeliverable = BaseDeliverable & {
+  kind: "code_change";
+  headerLabel?: string; // default "Changes"
+  headerAction?: string; // default "View changes"
+  title: string; // e.g. "src/app/pricing/page.tsx"
+  meta?: string;
+  language?: string;
   hunks: Array<{
-    header?: string; // e.g. "@@ -12,6 +12,9 @@"
+    header?: string;
     lines: Array<
       | { type: "add"; text: string }
       | { type: "del"; text: string }
@@ -68,42 +93,47 @@ export type FileChangeDeliverable = {
     >;
   }>;
   onOpen?: () => void;
-  onClose?: () => void;
 };
 
-/* ───────────────────────── Styling helpers ───────────────────────── */
+/* ───────────────────────── Card shell (Amie-like) ───────────────────────── */
 
 type HeaderStyle = {
   icon: React.ReactNode;
-  iconBoxClass: string; // small rounded rectangle background
-  label: string; // left header text
+  iconBoxClass: string; // small rounded-rect background
+  label: string;
 };
 
 function headerStyleFor(d: Deliverable): HeaderStyle {
   switch (d.kind) {
     case "email":
       return {
-        icon: <Mail className="h-3.5 w-3.5 text-sky-600" />,
-        iconBoxClass: "bg-sky-50 ring-1 ring-sky-100",
-        label: d.title ?? "Email",
+        icon: <Mail className="h-3.5 w-3.5 text-white" />,
+        iconBoxClass: "bg-[#2892F7] ",
+        label: d.headerLabel ?? "Email",
       };
     case "doc":
       return {
-        icon: <FileText className="h-3.5 w-3.5 text-violet-600" />,
-        iconBoxClass: "bg-violet-50 ring-1 ring-violet-100",
-        label: "Document",
+        icon: <FileText className="h-3.5 w-3.5 text-white" />,
+        iconBoxClass: "bg-[#F068DC] ",
+        label: d.title ?? "Document",
       };
     case "sheet":
       return {
-        icon: <SheetIcon className="h-3.5 w-3.5 text-emerald-600" />,
-        iconBoxClass: "bg-emerald-50 ring-1 ring-emerald-100",
-        label: "Spreadsheet",
+        icon: <SheetIcon className="h-3.5 w-3.5 text-white" />,
+        iconBoxClass: "bg-[#2ED87D] ",
+        label: d.title ?? "Spreadsheet",
       };
-    case "file_change":
+    case "file_edited":
       return {
-        icon: <Code className="h-3.5 w-3.5 text-orange-600" />,
-        iconBoxClass: "bg-orange-50 ring-1 ring-orange-100",
-        label: "Changes",
+        icon: <FileDiff className="h-3.5 w-3.5 text-white" />,
+        iconBoxClass: "bg-[#E24248] ",
+        label: d.title ?? "File",
+      };
+    case "code_change":
+      return {
+        icon: <Code className="h-3.5 w-3.5 text-neutral-700" />,
+        iconBoxClass: "bg-[#FFE248] ",
+        label: d.headerLabel ?? "Changes",
       };
   }
 }
@@ -118,11 +148,11 @@ function ActionCardShell({
   children: React.ReactNode;
 }) {
   const hs = headerStyleFor(deliverable);
-  const onClose = (deliverable as any).onClose as undefined | (() => void);
+  const onClose = deliverable.onClose;
 
   return (
     <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">
-      {/* header (match reference: light gray, small icon box, subtle borders) */}
+      {/* header: light gray, subtle, single border */}
       <div className="flex items-center justify-between bg-neutral-50 px-4 py-2.5">
         <div className="flex items-center gap-2">
           <span
@@ -138,35 +168,30 @@ function ActionCardShell({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 text-[13px] text-neutral-400">
+        <div className="flex items-center gap-2 text-[13px] text-neutral-400">
           {headerRight}
-          <Separator orientation="vertical" className="h-4 bg-neutral-200" />
+          <span className="mx-1 text-neutral-300">|</span>
           <button
             type="button"
             onClick={onClose}
             className="grid h-6 w-6 place-items-center rounded-md hover:bg-neutral-100"
             aria-label="Close"
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4 text-neutral-500" />
           </button>
         </div>
       </div>
 
-      <Separator className="bg-neutral-200" />
+      {/* single divider (avoid stacked separators) */}
+      <div className="h-px w-full bg-neutral-200" />
       {children}
     </div>
   );
 }
 
-/* ───────────────────────── Email ───────────────────────── */
+/* ───────────────────────── Shared small primitives ───────────────────────── */
 
-function KeyValueRow({
-  k,
-  v,
-}: {
-  k: string;
-  v?: React.ReactNode;
-}) {
+function KVRow({ k, v }: { k: string; v?: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[86px_1fr] items-center px-4 py-3">
       <div className="text-[13px] text-neutral-500">{k}</div>
@@ -175,6 +200,31 @@ function KeyValueRow({
   );
 }
 
+function Divider() {
+  return <div className="h-px w-full bg-neutral-200" />;
+}
+
+function HeaderLinkButton({
+  label,
+  onClick,
+}: {
+  label: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[13px] text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600"
+    >
+      {label}
+      <ExternalLink className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+/* ───────────────────────── Email ───────────────────────── */
+
 function EmailCard({ d }: { d: EmailDeliverable }) {
   return (
     <ActionCardShell
@@ -182,10 +232,10 @@ function EmailCard({ d }: { d: EmailDeliverable }) {
       headerRight={<span className="tabular-nums">{d.headerAction ?? "Send email"}</span>}
     >
       <div>
-        <KeyValueRow k="To" v={d.to} />
-        <Separator className="bg-neutral-200" />
-        <KeyValueRow k="Subject" v={d.subject} />
-        <Separator className="bg-neutral-200" />
+        <KVRow k="To" v={d.to} />
+        <Divider />
+        <KVRow k="Subject" v={d.subject} />
+        <Divider />
         <div className="px-4 py-4">
           <pre className="whitespace-pre-wrap font-sans text-[14px] leading-6 text-neutral-900">
             {d.body ?? ""}
@@ -196,63 +246,282 @@ function EmailCard({ d }: { d: EmailDeliverable }) {
   );
 }
 
-/* ───────────────────────── Doc ───────────────────────── */
+/* ───────────────────────── Document preview (formatted page) ───────────────────────── */
 
-function DocPreview({
-  previewImageUrl,
-  previewTitle,
-  previewText,
+/* ───────────────────────── Document (REWORKED 1:1) ───────────────────────── */
+
+export type DocSource =
+  | { type: "file"; label: string } // e.g. "notes.md"
+  | { type: "link"; label: string }; // e.g. "Productboard"
+
+export type DocInline =
+  | { t: "text"; v: string }
+  | { t: "add"; v: string } // added text
+  | { t: "del"; v: string }; // removed text
+
+export type DocParagraph = {
+  kind: "p";
+  inlines: DocInline[];
+};
+
+export type DocHeading = {
+  kind: "h2";
+  text: string;
+};
+
+export type DocBullets = {
+  kind: "bullets";
+  items: DocInline[][];
+};
+
+export type DocSection = DocHeading | DocParagraph | DocBullets;
+
+export type DocDeliverable = BaseDeliverable & {
+  kind: "doc";
+  headerLabel?: string; // default "Document"
+  headerAction?: string; // default "Open"
+  title: string; // card title line
+  onOpen?: () => void;
+
+  // Preview meta (matches reference)
+  docTitle: string; // big title in preview
+  createdLabel: string; // "Mon, 10 Feb, 17:45 → 18:12"
+  sourcesLabel?: string; // "notes.md, CRM export, ..."
+
+  // Content (summary transcript-like)
+  sections: DocSection[];
+
+  // optional: show edit mode (adds highlighting)
+  mode?: "view" | "edit";
+};
+
+function DocTabs({
+  active = "Summary",
 }: {
-  previewImageUrl?: string;
-  previewTitle?: string;
-  previewText?: string;
+  active?: "Private notes" | "Summary" | "Transcript";
+}) {
+  const Tab = ({
+    label,
+    isActive,
+  }: {
+    label: "Private notes" | "Summary" | "Transcript";
+    isActive: boolean;
+  }) => (
+    <button
+      type="button"
+      className={cn(
+        "relative px-1 py-2 text-[14px] font-medium",
+        isActive ? "text-neutral-900" : "text-neutral-500 hover:text-neutral-700"
+      )}
+    >
+      {label}
+      {isActive ? (
+        <span className="absolute -bottom-[1px] left-0 right-0 h-[2px] bg-neutral-900" />
+      ) : null}
+    </button>
+  );
+
+  return (
+    <div className="flex gap-8 border-b border-neutral-200 px-4">
+      <Tab label="Private notes" isActive={active === "Private notes"} />
+      <Tab label="Summary" isActive={active === "Summary"} />
+      <Tab label="Transcript" isActive={active === "Transcript"} />
+    </div>
+  );
+}
+
+function DocToolbar() {
+  // simple text controls like the reference row: English / General / Copy summary
+  const Chip = ({ label }: { label: string }) => (
+    <button
+      type="button"
+      className="inline-flex items-center gap-2 text-[14px] text-neutral-500 hover:text-neutral-700"
+    >
+      <span className="text-neutral-400">⟂</span>
+      <span>{label}</span>
+      <span className="text-neutral-300">▾</span>
+    </button>
+  );
+
+  return (
+    <div className="flex items-center gap-8 px-4 py-3 text-[14px]">
+      <Chip label="English" />
+      <Chip label="General" />
+      <button
+        type="button"
+        className="inline-flex items-center gap-2 text-[14px] text-neutral-500 hover:text-neutral-700"
+      >
+        <span className="text-neutral-400">⧉</span>
+        Copy summary
+      </button>
+    </div>
+  );
+}
+
+function InlineRun({
+  inlines,
+  mode,
+}: {
+  inlines: DocInline[];
+  mode: "view" | "edit";
 }) {
   return (
-    <div className="px-4 py-4">
-      <div className="grid grid-cols-[140px_1fr] gap-4">
-        {/* left thumbnail */}
-        <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-          {previewImageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={previewImageUrl}
-              alt="Document preview"
-              className="h-[180px] w-full object-cover"
-            />
-          ) : (
-            // clean “first page” skeleton
-            <div className="h-[180px] w-full bg-white p-3">
-              <div className="h-3 w-10/12 rounded bg-neutral-200" />
-              <div className="mt-3 space-y-2">
-                <div className="h-2.5 w-full rounded bg-neutral-100" />
-                <div className="h-2.5 w-11/12 rounded bg-neutral-100" />
-                <div className="h-2.5 w-10/12 rounded bg-neutral-100" />
-                <div className="h-2.5 w-9/12 rounded bg-neutral-100" />
-                <div className="h-2.5 w-11/12 rounded bg-neutral-100" />
-                <div className="h-2.5 w-8/12 rounded bg-neutral-100" />
+    <>
+      {inlines.map((x, i) => {
+        if (x.t === "text") return <React.Fragment key={i}>{x.v}</React.Fragment>;
+
+        // EDIT highlighting (doc-style, subtle)
+        if (x.t === "add") {
+          return (
+            <span
+              key={i}
+              className={cn(
+                mode === "edit" && "bg-emerald-50 text-neutral-900",
+                "rounded-sm px-1"
+              )}
+            >
+              {x.v}
+            </span>
+          );
+        }
+
+        return (
+          <span
+            key={i}
+            className={cn(
+              mode === "edit" && "bg-rose-50 text-neutral-700 line-through",
+              "rounded-sm px-1"
+            )}
+          >
+            {x.v}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+function EditGutter({
+    hasAdd,
+    hasDel,
+    mode,
+  }: {
+    hasAdd: boolean;
+    hasDel: boolean;
+    mode: "view" | "edit";
+  }) {
+    // keep alignment stable even when not editing
+    if (mode !== "edit") return <div className="w-[6px] shrink-0" />;
+  
+    const color =
+      hasAdd ? "bg-emerald-500" : hasDel ? "bg-rose-500" : "bg-transparent";
+  
+    return (
+      <div className="w-[6px] shrink-0 flex justify-center">
+        <div className={`w-[3.5px] self-stretch rounded-full ${color}`} />
+      </div>
+    );
+  }
+
+function DocBody({ d }: { d: DocDeliverable }) {
+  const mode = d.mode ?? "view";
+
+  return (
+    <div className="px-4 pb-6 pt-2">
+      {/* Section Title + Subheading like reference */}
+      {/* You can model these as real sections too; keeping fixed styling here */}
+      <div className="mt-3 text-[22px] font-semibold tracking-tight text-neutral-900">
+        Growth and Development Update
+      </div>
+      <div className="mt-2 text-[16px] font-semibold text-neutral-900">
+        Growth Metrics and Performance
+      </div>
+
+      <div className="mt-4 space-y-5 text-[16px] leading-7 text-neutral-800">
+        {d.sections.map((s, idx) => {
+          if (s.kind === "h2") {
+            return (
+              <div key={idx} className="pt-2 text-[16px] font-semibold text-neutral-900">
+                {s.text}
               </div>
-            </div>
-          )}
+            );
+          }
+
+          if (s.kind === "p") {
+            const hasAdd = s.inlines.some((x) => x.t === "add");
+            const hasDel = s.inlines.some((x) => x.t === "del");
+            return (
+              <div key={idx} className="flex gap-3">
+                <EditGutter hasAdd={hasAdd} hasDel={hasDel} mode={mode} />
+                <p className="min-w-0 flex-1">
+                  <InlineRun inlines={s.inlines} mode={mode} />
+                </p>
+              </div>
+            );
+          }
+
+          // bullets
+          return (
+            <ul key={idx} className="space-y-4">
+              {s.items.map((item, j) => {
+                const hasAdd = item.some((x) => x.t === "add");
+                const hasDel = item.some((x) => x.t === "del");
+                return (
+                  <li key={j} className="flex gap-3">
+                    <EditGutter hasAdd={hasAdd} hasDel={hasDel} mode={mode} />
+                    <div className="flex min-w-0 flex-1 gap-3">
+                      <span className="mt-[10px] h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-900" />
+                      <span className="min-w-0 flex-1">
+                        <InlineRun inlines={item} mode={mode} />
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DocPreview({ d }: { d: DocDeliverable }) {
+  return (
+    <div>
+      {/* Big bold title */}
+      <div className="px-4 pt-6">
+        <div className="text-[40px] font-semibold tracking-tight text-neutral-900">
+          {d.docTitle}
         </div>
 
-        {/* right text */}
-        <div className="min-w-0">
-          {previewTitle ? (
-            <div className="text-[14px] font-medium text-neutral-900">
-              {previewTitle}
+        {/* Created + Sources rows */}
+        <div className="mt-8 space-y-3 text-[16px] text-neutral-500">
+          <div className="grid grid-cols-[120px_1fr] gap-6">
+            <div className="text-neutral-400">Created</div>
+            <div className="text-neutral-600">{d.createdLabel}</div>
+          </div>
+
+          <div className="grid grid-cols-[120px_1fr] gap-6">
+            <div className="text-neutral-400">Sources</div>
+            <div className="text-neutral-600">
+              {d.sourcesLabel ?? "—"}
             </div>
-          ) : null}
-          {previewText ? (
-            <div className={cn("text-[14px] leading-6 text-neutral-700", previewTitle ? "mt-2" : "")}>
-              {previewText}
-            </div>
-          ) : (
-            <div className="text-[14px] leading-6 text-neutral-500">
-              Preview unavailable.
-            </div>
-          )}
+          </div>
         </div>
       </div>
+
+      {/* single separator like reference */}
+      <div className="mt-8 h-px w-full bg-neutral-200" />
+
+      {/* tabs */}
+      <DocTabs active="Summary" />
+
+      {/* toolbar */}
+      <DocToolbar />
+
+      {/* body */}
+      <DocBody d={d} />
     </div>
   );
 }
@@ -261,134 +530,182 @@ function DocCard({ d }: { d: DocDeliverable }) {
   return (
     <ActionCardShell
       deliverable={d}
-      headerRight={
-        <button
-          type="button"
-          onClick={d.onOpen}
-          className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-[13px] text-neutral-500 hover:bg-neutral-100"
-        >
-          {d.headerAction ?? "Open"}
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      }
+      headerRight={<HeaderLinkButton label={d.headerAction ?? "Open"} onClick={d.onOpen} />}
     >
-      <div className="px-4 py-3">
-        <div className="text-[14px] font-medium text-neutral-900 truncate">
-          {d.title}
-        </div>
-        {d.meta ? (
-          <div className="mt-1 text-[13px] text-neutral-500">{d.meta}</div>
-        ) : null}
-      </div>
-      <Separator className="bg-neutral-200" />
-      <DocPreview
-        previewImageUrl={d.previewImageUrl}
-        previewTitle={d.previewTitle}
-        previewText={d.previewText}
-      />
+ 
+      {/* Single divider from shell already exists; don’t add extra */}
+      <DocPreview d={d} />
     </ActionCardShell>
   );
 }
 
-/* ───────────────────────── Sheet ───────────────────────── */
+/* ───────────────────────── Spreadsheet ───────────────────────── */
 
-function SheetPreview({
-  columns,
-  rows,
-}: {
-  columns: string[];
-  rows: Array<Array<string | number>>;
-}) {
-  const maxRows = 6;
-  const shown = rows.slice(0, maxRows);
 
-  return (
-    <div className="px-4 py-4">
-      <div className="overflow-hidden rounded-xl border border-neutral-200">
-        <table className="w-full table-fixed border-collapse">
-          <thead className="bg-neutral-50">
-            <tr>
-              {columns.map((c) => (
-                <th
-                  key={c}
-                  className="truncate border-b border-neutral-200 px-3 py-2 text-left text-[12px] font-medium text-neutral-600"
-                >
-                  {c}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="bg-white">
-            {shown.map((r, i) => (
-              <tr key={i} className="border-b border-neutral-100 last:border-b-0">
-                {r.map((cell, j) => (
-                  <td
-                    key={j}
-                    className="truncate px-3 py-2 text-[13px] text-neutral-800"
-                  >
-                    {cell}
-                  </td>
-                ))}
-              </tr>
+
+function SheetTablePreview({
+    columns,
+    rows,
+    s,
+  }: {
+    columns: string[];
+    rows: Array<Array<string | number>>;
+    s: SheetChangeSummary;
+  }) {
+    const maxRows = 8;
+    const shown = rows.slice(0, maxRows);
+    const bits: string[] = [];
+  if (s.rowsAdded) bits.push(`${s.rowsAdded} rows added`);
+  if (s.rowsEdited) bits.push(`${s.rowsEdited} rows edited`);
+  if (s.rowsDeleted) bits.push(`${s.rowsDeleted} rows deleted`);
+  if (s.formulasAdded) bits.push(`${s.formulasAdded} formulas added`);
+  if (s.formulasEdited) bits.push(`${s.formulasEdited} formulas edited`);
+  if (s.formulasDeleted) bits.push(`${s.formulasDeleted} formulas deleted`);
+
+
+    return (
+      <div className="px-2.5 pb-3 pt-2.5">
+        {/* Notion-like table surface: ONE border container */}
+        <div className="overflow-hidden rounded-xl  bg-white">
+          {/* Header row */}
+          <div className="grid" style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}>
+            {columns.map((c) => (
+              <div
+                key={c}
+                className="border-b border-neutral-200 px-3 py-2 text-[12px] font-medium text-neutral-500"
+              >
+                <div className="truncate">{c}</div>
+              </div>
             ))}
-          </tbody>
-        </table>
-      </div>
-
-      {rows.length > maxRows ? (
-        <div className="mt-2 text-[12px] text-neutral-400">
-          Showing {maxRows} of {rows.length} rows
+          </div>
+  
+          {/* Body rows */}
+          <div className="divide-y divide-neutral-200">
+            {shown.map((r, i) => (
+              <div
+                key={i}
+                className="grid"
+                style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+              >
+                {r.map((cell, j) => (
+                  <div key={j} className="px-3 py-2 text-[13px] text-neutral-800">
+                    <div className="truncate">{cell}</div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
-      ) : null}
-    </div>
-  );
-}
+  
+        {rows.length > maxRows ? (
+          <div className="mt-2 px-1 flex flex-row justify-between text-[12px] text-neutral-400">
+           <div> Showing {maxRows} of {rows.length} rows</div>
+           {s.dataNotes?.length ? (
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {bits.map((b, i) => (
+            <span key={i} className="text-neutral-600">
+              {b}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-neutral-500">No change summary available.</div>
+      )}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
 
 function SheetCard({ d }: { d: SheetDeliverable }) {
   return (
     <ActionCardShell
       deliverable={d}
       headerRight={
-        <button
-          type="button"
+        <HeaderLinkButton
+          label={d.headerAction ?? "Open sheet"}
           onClick={d.onOpen}
-          className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-[13px] text-neutral-500 hover:bg-neutral-100"
-        >
-          {d.headerAction ?? "Open sheet"}
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
+        />
       }
     >
-      <div className="px-4 py-3">
-        <div className="truncate text-[14px] font-medium text-neutral-900">
-          {d.title}
-        </div>
+      <div className="px-4 py-2">
         {d.meta ? (
           <div className="mt-1 text-[13px] text-neutral-500">{d.meta}</div>
         ) : null}
       </div>
-      <Separator className="bg-neutral-200" />
-      <SheetPreview columns={d.columns} rows={d.rows} />
+
+    
+
+      {/* single divider before table */}
+      <Divider />
+      <SheetTablePreview columns={d.columns} rows={d.rows} s={d.summary!} />
     </ActionCardShell>
   );
 }
 
-/* ───────────────────────── File change ───────────────────────── */
+/* ───────────────────────── File edited (PDF/Doc changes) ───────────────────────── */
 
-function DiffPreview({ hunks }: { hunks: FileChangeDeliverable["hunks"] }) {
+function FileEditedCard({ d }: { d: FileEditedDeliverable }) {
+    const hasDocs = Boolean(d.beforeDoc || d.afterDoc);
+  
+    return (
+      <ActionCardShell
+        deliverable={d}
+        headerRight={
+          <HeaderLinkButton label={d.headerAction ?? "Open"} onClick={d.onOpen} />
+        }
+      >
+      
+  
+  
+        <div className="px-4 pb-4">
+          {/* change bullets */}
+        
+  
+          {/* before/after docs using SAME preview */}
+          {hasDocs ? (
+            <div className="mt-3 grid gap-6 ">
+
+  
+              {d.afterDoc ? (
+                <div className="overflow-hidden rounded-2xl  bg-white">
+                 
+                 
+                  <DocPreview d={d.afterDoc} />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="px-4 py-3">
+        
+        <div className="mt-1 text-[13px] text-neutral-500">
+          {d.meta ? d.meta : "Updated"}
+          {d.fileType ? ` • ${d.fileType.toUpperCase()}` : ""}
+          {d.changeSummary ? ` • ${d.changeSummary}` : ""}
+        </div>
+      </div>
+      </ActionCardShell>
+    );
+  }
+/* ───────────────────────── Code diff (kept as separate option) ───────────────────────── */
+
+function CodeDiffPreview({ hunks }: { hunks: CodeChangeDeliverable["hunks"] }) {
   const maxLines = 14;
-
   const flattened: Array<{ type: "add" | "del" | "ctx"; text: string }> = [];
+
   for (const h of hunks) {
     if (h.header) flattened.push({ type: "ctx", text: h.header });
     for (const l of h.lines) flattened.push(l);
   }
+
   const shown = flattened.slice(0, maxLines);
 
   return (
     <div className="px-4 py-4">
-      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-        <div className="bg-neutral-50 px-3 py-2 text-[12px] font-medium text-neutral-600">
+      <div className="rounded-xl bg-neutral-50">
+        <div className="px-3 py-2 text-[12px] font-medium text-neutral-600">
           Diff preview
         </div>
         <div className="font-mono text-[12px] leading-5">
@@ -431,55 +748,47 @@ function DiffPreview({ hunks }: { hunks: FileChangeDeliverable["hunks"] }) {
   );
 }
 
-function FileChangeCard({ d }: { d: FileChangeDeliverable }) {
+function CodeChangeCard({ d }: { d: CodeChangeDeliverable }) {
   return (
     <ActionCardShell
       deliverable={d}
-      headerRight={
-        <button
-          type="button"
-          onClick={d.onOpen}
-          className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-[13px] text-neutral-500 hover:bg-neutral-100"
-        >
-          {d.headerAction ?? "View changes"}
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-      }
+      headerRight={<HeaderLinkButton label={d.headerAction ?? "View changes"} onClick={d.onOpen} />}
     >
       <div className="px-4 py-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="truncate text-[14px] font-medium text-neutral-900">
-            {d.title}
-          </div>
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="truncate text-[14px] font-medium text-neutral-900">{d.title}</div>
           {d.language ? (
             <div className="shrink-0 rounded-md bg-neutral-100 px-2 py-0.5 text-[12px] text-neutral-500">
               {d.language}
             </div>
           ) : null}
         </div>
-        {d.meta ? (
-          <div className="mt-1 text-[13px] text-neutral-500">{d.meta}</div>
-        ) : null}
+        {d.meta ? <div className="mt-1 text-[13px] text-neutral-500">{d.meta}</div> : null}
       </div>
-      <Separator className="bg-neutral-200" />
-      <DiffPreview hunks={d.hunks} />
+      <Divider />
+      <CodeDiffPreview hunks={d.hunks} />
     </ActionCardShell>
   );
 }
 
-/* ───────────────────────── Public component ───────────────────────── */
+/* ───────────────────────── Public list ───────────────────────── */
 
 export function Deliverables({ items }: { items: Deliverable[] }) {
   return (
     <div className="mt-16 pb-24">
-      <div className="text-sm font-medium text-neutral-400">Actions</div>
+      <div className="flex flex-row items-center justify-between"><div className="text-sm font-medium text-neutral-400">Deliverables</div>
+        <div className="text-sm font-medium text-neutral-400">
+            <PlusIcon className="h-4 w-4" />
+        </div>
+      </div>
 
       <div className="mt-6 space-y-6">
         {items.map((d, idx) => {
           if (d.kind === "email") return <EmailCard key={idx} d={d} />;
           if (d.kind === "doc") return <DocCard key={idx} d={d} />;
           if (d.kind === "sheet") return <SheetCard key={idx} d={d} />;
-          return <FileChangeCard key={idx} d={d} />;
+          if (d.kind === "file_edited") return <FileEditedCard key={idx} d={d} />;
+          return <CodeChangeCard key={idx} d={d} />;
         })}
       </div>
     </div>
