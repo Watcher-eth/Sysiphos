@@ -138,8 +138,7 @@ import {
       taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
       workflowVersionId: uuid("workflow_version_id").references(() => workflowVersions.id, { onDelete: "set null" }),
   
-      parentRunId: uuid("parent_run_id").references(() => runs.id, { onDelete: "set null" }),
-  
+      parentRunId: uuid("parent_run_id"),  
       status: text("status").notNull().$type<RunStatus>().default("queued"),
       title: text("title").notNull(),
       description: text("description").notNull().default(""),
