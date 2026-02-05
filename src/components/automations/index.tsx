@@ -6,64 +6,57 @@ import { Cloud, Clock } from "lucide-react";
 
 type Card = {
   icon: string;
-  iconBg: string;
   title: string;
 };
 
 const CARDS: Card[] = [
-  {
-    icon: "🗓️",
-    iconBg: "bg-red-50",
-    title:
-      "Scan recent commits (since the last run, or last 24h) for likely bugs and propose minimal fixes.",
-  },
-  {
-    icon: "📘",
-    iconBg: "bg-blue-50",
-    title: "Draft weekly release notes from merged PRs (include links when available).",
-  },
-  {
-    icon: "🟣",
-    iconBg: "bg-purple-50",
-    title: "Summarize yesterday's git activity for standup.",
-  },
-  {
-    icon: "📉",
-    iconBg: "bg-sky-50",
-    title:
-      "Summarize CI failures and flaky tests from the last CI window; suggest top fixes.",
-  },
-  {
-    icon: "🏆",
-    iconBg: "bg-amber-50",
-    title: "Create a small classic game with minimal scope.",
-  },
-  {
-    icon: "🧠",
-    iconBg: "bg-pink-50",
-    title: "From recent PRs and reviews, suggest next skills to deepen.",
-  },
-  {
-    icon: "✏️",
-    iconBg: "bg-orange-50",
-    title:
-      "Synthesize this week's PRs, rollouts, incidents, and reviews into a weekly update.",
-  },
-  {
-    icon: "📊",
-    iconBg: "bg-indigo-50",
-    title:
-      "Compare recent changes to benchmarks or traces and flag regressions early.",
-  },
-  {
-    icon: "🧹",
-    iconBg: "bg-orange-50",
-    title: "Detect dependency and SDK drift and propose a minimal alignment plan.",
-  },
-];
-
+    {
+      icon: "/icons/mail.png",
+      title:
+        "Summarize all new emails, flag urgent ones, and draft replies for approval at 9am every day.",
+    },
+    {
+      icon: "/icons/calendar.png",
+      title:
+        "Daily schedule brief: highlight today’s meetings, prep notes, and any conflicts or travel time.",
+    },
+    {
+      icon: "/icons/notes.jpeg",
+      title:
+        "Prepare a progress report for the client every week based on email updates.",
+    },
+    {
+      icon: "/icons/target.jpeg",
+      title:
+        "Find me 5 potential clients for the week and prepare a short email to each of them.",
+    },
+    {
+      icon: "/icons/bars.jpeg",
+      title:
+        "Weekly update: compile progress, blockers, and next steps into a clean status report.",
+    },
+    {
+      icon: "/icons/invoice.jpeg",
+      title:
+        "Organize our receipts, check line items, and prepare statements once a month.",
+    },
+    {
+      icon: "/icons/folder.png",
+      title:
+        "Rename and file documents, add tags, flag and consolidate duplicates.",
+    },
+    {
+      icon: "/icons/handshake.png",
+      title:
+        "Prepare and schedule a new inventory email for our distributors every week.",
+    },
+    {
+      icon: "/icons/plane.jpeg",
+      title:
+        "Find and book me a flight to Lisbon on Mondays for the next 4 weeks.",
+    },
+  ];
 function TopIconSwitcher() {
-  // Icons to cycle between (you can add more)
   const icons = React.useMemo(
     () => [
       { key: "clock", Node: Clock },
@@ -83,7 +76,6 @@ function TopIconSwitcher() {
 
   return (
     <div className="relative grid place-items-center">
-      {/* Animated swap (rotate in/out like the video) */}
       <AnimatePresence mode="wait" initial={false}>
         <motion.div
           key={icons[i]!.key}
@@ -97,7 +89,6 @@ function TopIconSwitcher() {
         </motion.div>
       </AnimatePresence>
 
-      {/* Little “mouth” line like your reference */}
       <div className="absolute bottom-[6px] h-[3px] w-3 rounded-full bg-neutral-900" />
     </div>
   );
@@ -107,36 +98,25 @@ function CardTile({ card }: { card: Card }) {
   return (
     <button
       className={[
-        "rounded-2xl border border-neutral-200/70 bg-white p-5 text-left",
+        "rounded-3xl border border-neutral-200/70 bg-white p-4 text-left",
         "shadow-[0_1px_0_rgba(0,0,0,0.03)]",
         "hover:shadow-[0_12px_28px_rgba(0,0,0,0.06)] hover:border-neutral-300",
         "transition",
       ].join(" ")}
     >
-      <div className="flex items-start gap-3">
-        {/* Tiny “Airbnb-ish” icon tile */}
-        <div
-          className={[
-            "grid h-9 w-9 place-items-center rounded-xl border border-neutral-200",
-            card.iconBg,
-            "shadow-[0_6px_14px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9)]",
-          ].join(" ")}
-        >
-          <span className="text-base">{card.icon}</span>
-        </div>
+      <div className="flex  items-start gap-3">
+      
+          <img className="h-10 w-10" src={card.icon} alt={card.title} />
 
-        <div className="text-[13px] leading-snug text-neutral-900">
-          {card.title}
+          <div className="text-[13px] leading-snug text-neutral-900">{card.title}</div>
         </div>
-      </div>
-    </button>
-  );
-}
+      </button>
+    );
+  }
 
 export default function AutomationsPage() {
   return (
     <div className="min-h-screen bg-white">
-      {/* Top right actions */}
       <div className="mx-auto flex w-full max-w-[1120px] items-center justify-end px-8 pt-6">
         <div className="flex items-center gap-4">
           <button className="text-sm text-neutral-400 hover:text-neutral-600 transition">
@@ -155,7 +135,6 @@ export default function AutomationsPage() {
         </div>
       </div>
 
-      {/* Center content */}
       <main className="mx-auto flex w-full max-w-[1120px] flex-col items-center px-8">
         <div className="mt-28 flex flex-col items-center">
           <TopIconSwitcher />
@@ -174,7 +153,6 @@ export default function AutomationsPage() {
           </p>
         </div>
 
-        {/* Cards grid */}
         <div className="mt-12 grid w-full max-w-[880px] grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {CARDS.map((c, idx) => (
             <CardTile key={idx} card={c} />

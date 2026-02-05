@@ -1,5 +1,5 @@
 import { Geist, Geist_Mono } from "next/font/google";
-import HomePage from "@/components/home";
+import CreateTaskWizardPage from "@/components/tasks/create";
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
@@ -12,7 +12,7 @@ const geistMono = Geist_Mono({
 
 export default function Home() {
   return (
-    <HomePage />
+    <CreateTaskWizardPage />
 
   );
 }

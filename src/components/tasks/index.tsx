@@ -2,287 +2,161 @@
 
 import * as React from "react";
 import {
+  ChevronRight,
+  Loader2,
+  Plus as PlusIcon,
   MoreHorizontal,
-  Plus,
   Bell,
   RotateCcw,
-  Clock,
+  Clock3,
   Inbox,
-  Loader2,
-  GitPullRequestArrow,
-  AlertCircle,
-  Check,
+  Building2,
+  FileSpreadsheet,
+  Receipt,
 } from "lucide-react";
 
-type Status = "open" | "in_progress" | "review" | "success" | "error";
+/* ───────────────── Types ───────────────── */
 
-type Subtask = {
+type TaskStatus = "open" | "in_progress" | "review" | "success" | "error";
+type TodoStatus = "not_started" | "in_progress" | "done";
+
+type TodoItem = {
   id: string;
-  title: string;
-  done?: boolean;
-  dueLabel?: string;
+  text: string;
+  status?: TodoStatus;
+  triggerLabel?: string; // "Feb 10, 16:45"
 };
 
 type Task = {
   id: string;
   title: string;
-  dueLabel?: string;
+  status?: TaskStatus;
   pinned?: boolean;
   recurring?: boolean;
-  subtasks?: Subtask[];
-
-  // re-added (right-side task meta)
-  status?: Status;
-  activity?: string;
-  diff?: { plus: number; minus: number };
+  dueLabel?: string;
+  icon?: React.ReactNode;
+  todos: TodoItem[];
 };
 
-type Group = {
-  id: string;
-  title: string;
-  icon: React.ReactNode;
-  accent?: "neutral" | "orange";
-  tasks: Task[];
-};
+/* ───────────────── Demo tasks (replace later) ───────────────── */
 
-const GROUPS: Group[] = [
+const TASKS: Task[] = [
   {
-    id: "inbox",
-    title: "Inbox",
+    id: "task-tenant-accounting",
+    title: "Prepare tenant accounting + update owner balances — Holsteinische 18",
+    status: "in_progress",
+    pinned: true,
+    recurring: false,
+    dueLabel: "Due Feb 11",
+    icon: <Receipt className="h-4 w-4 text-neutral-400" />,
+    todos: [
+      { id: "t1", text: "Import rent roll + bank export", status: "done", triggerLabel: "Feb 10, 14:05" },
+      { id: "t2", text: "Reconcile payments vs bank export", status: "in_progress", triggerLabel: "Feb 10, 14:40" },
+      { id: "t3", text: "Create missing data tracker sheet", status: "done", triggerLabel: "Feb 10, 15:10" },
+      { id: "t4", text: "Draft tenant follow-up email template", status: "done", triggerLabel: "Feb 10, 15:25" },
+      { id: "t5", text: "Send emails to tenants missing documents", status: "not_started", triggerLabel: "Feb 10, 16:45" },
+      { id: "t6", text: "Update owner balances document", status: "not_started", triggerLabel: "Feb 11, 10:00" },
+    ],
+  },
+  {
+    id: "task-tenant-missing-docs",
+    title: "Collect missing tenant documents — March close",
+    status: "open",
+    pinned: false,
+    recurring: true,
+    dueLabel: "Due Feb 14",
     icon: <Inbox className="h-4 w-4 text-neutral-400" />,
-    accent: "neutral",
-    tasks: [
-      {
-        id: "t1",
-        title: "Make friends",
-        dueLabel: "Jan 08, 1:45 PM",
-        pinned: true,
-        recurring: true,
-        status: "in_progress",
-        activity: "Reading og-image-generator.js",
-        diff: { plus: 1, minus: 1 },
-        subtasks: [
-          { id: "s1", title: "Wake up!", done: true, dueLabel: "Jan 09, 1 PM" },
-          { id: "s2", title: "To be upgraded", done: true, dueLabel: "Jan 10, 1:15 PM" },
-        ],
-      },
+    todos: [
+      { id: "m1", text: "Check which tenants are missing ID / SEPA / handover protocol", status: "done", triggerLabel: "Feb 10, 12:30" },
+      { id: "m2", text: "Prepare follow-up list (phone + email)", status: "not_started", triggerLabel: "Feb 11, 09:30" },
+      { id: "m3", text: "Send reminders + log responses", status: "not_started", triggerLabel: "Feb 11, 11:00" },
     ],
   },
   {
-    id: "today",
-    title: "Today",
-    icon: <Clock className="h-4 w-4 text-neutral-400" />,
-    accent: "neutral",
-    tasks: [
-      {
-        id: "t2",
-        title: "Make friends",
-        dueLabel: "Jan 08, 1:45 PM",
-        pinned: true,
-        recurring: true,
-        status: "review",
-        activity: "PR ready for review",
-        diff: { plus: 12, minus: 4 },
-        subtasks: [
-          { id: "s3", title: "Wake up!", done: true, dueLabel: "Jan 09, 1 PM" },
-          { id: "s4", title: "To be upgraded", done: true, dueLabel: "Jan 10, 1:15 PM" },
-        ],
-      },
-    ],
-  },
-  {
-    id: "no-termination",
-    title: "No termination date",
-    icon: <RotateCcw className="h-4 w-4 text-orange-500" />,
-    accent: "orange",
-    tasks: [
-      {
-        id: "t3",
-        title: "Move in",
-        status: "success",
-        diff: { plus: 3, minus: 1 },
-        subtasks: [
-          { id: "s5", title: "Being so charming", done: true },
-          { id: "s6", title: "Enhance", done: true },
-        ],
-      },
+    id: "task-balance-table-update",
+    title: "Update tenant balance table (existing) — normalize + mark missing",
+    status: "review",
+    pinned: false,
+    recurring: false,
+    dueLabel: "Due Feb 12",
+    icon: <FileSpreadsheet className="h-4 w-4 text-neutral-400" />,
+    todos: [
+      { id: "b1", text: "Normalize columns (rent, utilities, deposits, arrears)", status: "done", triggerLabel: "Feb 09, 17:10" },
+      { id: "b2", text: "Mark missing values + add notes column", status: "done", triggerLabel: "Feb 09, 17:45" },
+      { id: "b3", text: "Cross-check totals vs bank export", status: "in_progress", triggerLabel: "Feb 10, 10:15" },
+      { id: "b4", text: "Format + freeze header + export PDF for owner", status: "not_started", triggerLabel: "Feb 10, 18:00" },
     ],
   },
 ];
 
-/** ---------- tiny utils ---------- */
+/* ───────────────── tiny utils ───────────────── */
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-function StatusLabel(status: Status) {
-  switch (status) {
-    case "open":
-      return "Open";
-    case "in_progress":
-      return "In progress";
-    case "review":
-      return "Review";
-    case "success":
-      return "Done";
-    case "error":
-      return "Failed";
-  }
-}
+/* ───────────────── Marks + row end indicators (reused) ───────────────── */
 
-function StatusDotClass(status: Status) {
-  // very subtle tints
-  switch (status) {
-    case "open":
-      return "bg-neutral-300";
-    case "in_progress":
-      return "bg-neutral-400";
-    case "review":
-      return "bg-amber-300";
-    case "success":
-      return "bg-emerald-300";
-    case "error":
-      return "bg-rose-300";
-  }
-}
-
-/** ---------- top pills ---------- */
-
-function Pill({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active?: boolean;
-  label: string;
-  count?: number;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-[13px] font-medium",
-        active
-          ? "bg-neutral-100 text-neutral-900"
-          : "bg-transparent text-neutral-500 hover:text-neutral-700"
-      )}
-    >
-      <span>{label}</span>
-      {typeof count === "number" ? (
-        <span className="text-neutral-400">{count}</span>
-      ) : null}
-    </button>
-  );
-}
-
-/** ---------- left controls ---------- */
-
-function CheckboxDot({ checked }: { checked?: boolean }) {
+function TodoMark({ status }: { status: TodoStatus }) {
   return (
     <span
       className={cn(
-        "mt-[2px] inline-flex h-[18px] w-[18px] shrink-0 rounded-full ring-1",
-        checked ? "bg-neutral-900 ring-neutral-900" : "bg-white ring-neutral-300"
+        "grid h-[22px] w-[22px] shrink-0 place-items-center rounded-[6px] border bg-white p-[1.5px]",
+        status === "not_started"
+          ? "border-neutral-300"
+          : status === "in_progress"
+          ? "border-sky-500"
+          : "border-emerald-500"
       )}
-    />
-  );
-}
-
-function SubtaskCheck({ done }: { done?: boolean }) {
-  return (
-    <span className="mt-[2px] inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center">
-      {done ? <span className="text-neutral-400">✓</span> : null}
+    >
+      <span
+        className={cn(
+          "grid h-full w-full place-items-center rounded-[4px]",
+          status === "not_started" && "bg-transparent",
+          status === "in_progress" && "bg-sky-500",
+          status === "done" && "bg-emerald-500"
+        )}
+      />
     </span>
   );
 }
 
-/** ---------- right meta (re-added) ---------- */
-
-function Diff({ diff }: { diff: { plus: number; minus: number } }) {
-  return (
-    <div className="flex items-center gap-2 text-[13px] tabular-nums text-neutral-500">
-      <span className="text-emerald-600">+{diff.plus}</span>
-      <span className="text-rose-600">-{diff.minus}</span>
-    </div>
-  );
+function RowEnd({ status }: { status: TodoStatus }) {
+  if (status === "in_progress") {
+    return <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-500" />;
+  }
+  if (status === "done") {
+    return <ChevronRight className="h-4 w-4 shrink-0 text-neutral-300" />;
+  }
+  return <span className="h-4 w-4 shrink-0" />;
 }
 
-function MiniStatus({ status }: { status: Status }) {
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span className={cn("h-1.5 w-1.5 rounded-full", StatusDotClass(status))} />
-      <span className="text-[13px] text-neutral-500">{StatusLabel(status)}</span>
+/* ───────────────── Section header (match reference) ───────────────── */
 
-      {status === "in_progress" ? (
-        <Loader2 className="ml-1 h-3.5 w-3.5 animate-spin text-neutral-400" />
-      ) : null}
-      {status === "review" ? (
-        <GitPullRequestArrow className="ml-1 h-3.5 w-3.5 text-neutral-400" />
-      ) : null}
-      {status === "error" ? (
-        <AlertCircle className="ml-1 h-3.5 w-3.5 text-neutral-400" />
-      ) : null}
-      {status === "success" ? (
-        <Check className="ml-1 h-3.5 w-3.5 text-neutral-400" />
-      ) : null}
-    </span>
-  );
-}
-
-function TaskRight({
-  status,
-  activity,
-  diff,
-}: {
-  status?: Status;
-  activity?: string;
-  diff?: { plus: number; minus: number };
-}) {
-  const show = !!status || !!diff || !!activity;
-  if (!show) return null;
-
-  return (
-    <div className="ml-6 flex shrink-0 items-center gap-4">
-      <div className="hidden max-w-[320px] truncate text-[13px] text-neutral-400 md:block">
-        {activity ?? ""}
-      </div>
-
-      {diff ? <Diff diff={diff} /> : <div className="hidden md:block w-[54px]" />}
-
-      {status ? <MiniStatus status={status} /> : null}
-    </div>
-  );
-}
-
-/** ---------- header ---------- */
-
-function GroupHeader({
-  icon,
+function SectionHeader({
   title,
-  count,
-  accent,
+  leftIcon,
+  rightMeta,
 }: {
-  icon: React.ReactNode;
   title: string;
-  count: number;
-  accent?: "neutral" | "orange";
+  leftIcon?: React.ReactNode;
+  rightMeta?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between py-3">
-      <div className="flex items-center gap-3">
-        <div className="grid h-6 w-6 place-items-center">{icon}</div>
-        <div className="flex items-center gap-2">
-          <div className={cn("text-[13px] font-semibold text-neutral-900")}>{title}</div>
-          <div className="text-[13px] text-neutral-400">{count}</div>
+    <div className="flex items-center justify-between py-4">
+      <div className="flex min-w-0 items-center gap-1.5">
+        {leftIcon ? <div className="grid h-6 w-6 place-items-center">{leftIcon}</div> : null}
+
+        {/* bigger, not bold, dark gray like reference */}
+        <div className="min-w-0 truncate text-[15px] font-normal text-neutral-700">
+          {title}
         </div>
       </div>
 
       <div className="flex items-center gap-1 text-neutral-400">
+        {rightMeta}
         <button className="grid h-8 w-8 place-items-center rounded-full hover:bg-neutral-100">
-          <Plus className="h-4 w-4" />
+          <PlusIcon className="h-4 w-4" />
         </button>
         <button className="grid h-8 w-8 place-items-center rounded-full hover:bg-neutral-100">
           <MoreHorizontal className="h-4 w-4" />
@@ -292,17 +166,17 @@ function GroupHeader({
   );
 }
 
-function RowRightMeta({
-  dueLabel,
+function TaskMetaIcons({
   pinned,
   recurring,
+  dueLabel,
 }: {
-  dueLabel?: string;
   pinned?: boolean;
   recurring?: boolean;
+  dueLabel?: string;
 }) {
   return (
-    <div className="ml-6 flex shrink-0 items-center gap-2 text-[12px] text-neutral-400">
+    <div className="mr-1 hidden items-center gap-2 text-[12px] text-neutral-400 md:flex">
       {pinned ? <Bell className="h-4 w-4" /> : null}
       {dueLabel ? <span className="tabular-nums">{dueLabel}</span> : null}
       {recurring ? <RotateCcw className="h-4 w-4" /> : null}
@@ -310,150 +184,128 @@ function RowRightMeta({
   );
 }
 
-/** ---------- row ---------- */
+/* ───────────────── Todos list ───────────────── */
 
-function TaskRow({ task }: { task: Task }) {
-  const hasSub = (task.subtasks?.length ?? 0) > 0;
-
+function TodosList({
+  items,
+  showTrigger = true,
+}: {
+  items: Array<TodoItem & { taskId?: string; taskTitle?: string }>;
+  showTrigger?: boolean;
+}) {
   return (
-    <div className="py-3">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <CheckboxDot checked={task.status === "success"} />
-          <div className="min-w-0">
-            <div className="truncate text-[15px] font-medium text-neutral-900">
-              {task.title}
-            </div>
-          </div>
-        </div>
+    <div className="py-2">
+      <div className="space-y-5">
+        {items.map((t) => {
+          const status: TodoStatus = t.status ?? "not_started";
 
-        <div className="flex items-start gap-5">
-          <RowRightMeta
-            dueLabel={task.dueLabel}
-            pinned={task.pinned}
-            recurring={task.recurring}
-          />
-          <TaskRight status={task.status} activity={task.activity} diff={task.diff} />
-        </div>
-      </div>
+          return (
+            <div key={t.id} className="flex items-center justify-between gap-10">
+              <div className="flex min-w-0 items-center gap-3">
+                <TodoMark status={status} />
 
-      {hasSub ? (
-        <div className="mt-2 space-y-2 pl-[30px]">
-          {task.subtasks!.map((s) => (
-            <div key={s.id} className="flex items-start justify-between gap-4">
-              <div className="flex min-w-0 items-start gap-3">
-                <SubtaskCheck done={s.done} />
-                <div
-                  className={cn(
-                    "truncate text-[14px]",
-                    s.done ? "text-neutral-400 line-through" : "text-neutral-700"
-                  )}
-                >
-                  {s.title}
+                <div className="min-w-0">
+               
+
+                  <div
+                    className={cn(
+                      "truncate text-[17px] leading-6",
+                      status === "done"
+                        ? "text-neutral-400 line-through"
+                        : "text-neutral-900"
+                    )}
+                  >
+                    {t.text}
+                  </div>
                 </div>
               </div>
 
-              {s.dueLabel ? (
-                <div className="ml-6 shrink-0 text-[12px] text-neutral-400 tabular-nums">
-                  {s.dueLabel}
-                </div>
-              ) : null}
+              <div className="flex shrink-0 items-center gap-4">
+                {showTrigger && t.triggerLabel ? (
+                  <div className="text-[12px] text-neutral-400 tabular-nums">
+                    {t.triggerLabel}
+                  </div>
+                ) : null}
+                <RowEnd status={status} />
+              </div>
             </div>
-          ))}
-        </div>
-      ) : null}
-
-      {/* mobile-only right strip under row */}
-      {(task.activity || task.status || task.diff) ? (
-        <div className="mt-2 flex items-center justify-between pl-[30px] md:hidden">
-          <div className="truncate text-[13px] text-neutral-400">{task.activity ?? ""}</div>
-          <div className="ml-4 flex shrink-0 items-center gap-3">
-            {task.diff ? <Diff diff={task.diff} /> : null}
-            {task.status ? <MiniStatus status={task.status} /> : null}
-          </div>
-        </div>
-      ) : null}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-/** ---------- page ---------- */
+/* ───────────────── In Process section (only non-task section) ───────────────── */
+
+function InProcessSection({ tasks }: { tasks: Task[] }) {
+  const inProcess = tasks
+    .flatMap((task) =>
+      (task.todos ?? [])
+        .filter((x) => (x.status ?? "not_started") === "in_progress")
+        .map((x) => ({
+          ...x,
+          taskId: task.id,
+          taskTitle: task.title,
+        }))
+    )
+    .sort((a, b) => (a.triggerLabel ?? "").localeCompare(b.triggerLabel ?? ""));
+
+  if (!inProcess.length) return null;
+
+  return (
+    <div>
+      <SectionHeader
+        title="In Process"
+        leftIcon={<Clock3 className="h-4 w-4 text-neutral-400" />}
+      />
+      <div className="border-t border-neutral-100">
+        <div className="py-4">
+          <TodosList items={inProcess} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────── Each task becomes its own section ───────────────── */
+
+function TaskSection({ task }: { task: Task }) {
+  return (
+    <div>
+      <SectionHeader
+        title={task.title}
+        leftIcon={task.icon ?? <Building2 className="h-4 w-4 text-neutral-400" />}
+        rightMeta={
+          <TaskMetaIcons
+            pinned={task.pinned}
+            recurring={task.recurring}
+            dueLabel={task.dueLabel}
+          />
+        }
+      />
+      <div className="border-t border-neutral-100">
+        <div className="py-4">
+          <TodosList items={task.todos} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────── Page ───────────────── */
 
 export default function TasksPage() {
-  const [activeFilter, setActiveFilter] = React.useState<
-    "all" | "inbox" | "today" | "no-termination"
-  >("all");
-
-  const filters = [
-    { key: "all" as const, label: "All", count: 2 },
-    { key: "inbox" as const, label: "Inbox", count: 1 },
-    { key: "today" as const, label: "Today", count: 1 },
-    { key: "no-termination" as const, label: "No termination date", count: 1 },
-  ];
-
-  const visibleGroups =
-    activeFilter === "all"
-      ? GROUPS
-      : GROUPS.filter((g) => g.id === activeFilter);
-
   return (
     <div className="min-h-screen bg-white">
       <div className="mx-auto w-full max-w-[1100px] px-10 pt-8 pb-16">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1">
-            {filters.map((f) => (
-              <Pill
-                key={f.key}
-                active={activeFilter === f.key}
-                label={f.label}
-                count={f.count}
-                onClick={() => setActiveFilter(f.key)}
-              />
-            ))}
-          </div>
+        {/* tighter like reference */}
+        <div className="space-y-10">
+          <InProcessSection tasks={TASKS} />
 
-          <button className="grid h-9 w-9 place-items-center rounded-full text-neutral-400 hover:bg-neutral-100">
-            <Plus className="h-5 w-5" />
-          </button>
-        </div>
-
-        <div className="mt-6 space-y-8">
-          {visibleGroups.map((g) => (
-            <div key={g.id}>
-              <GroupHeader
-                icon={g.icon}
-                title={g.title}
-                count={g.tasks.length}
-                accent={g.accent}
-              />
-
-              <div className="border-t border-neutral-100">
-                {g.tasks.map((t) => (
-                  <div
-                    key={t.id}
-                    className="border-b border-neutral-100 last:border-b-0"
-                  >
-                    <TaskRow task={t} />
-                  </div>
-                ))}
-              </div>
-            </div>
+          {TASKS.map((t) => (
+            <TaskSection key={t.id} task={t} />
           ))}
-        </div>
-
-        <div className="pointer-events-none fixed inset-x-0 bottom-8 flex justify-center">
-          <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-neutral-100 bg-white px-2 py-2 shadow-[0_8px_30px_rgba(0,0,0,0.08)]">
-            <button className="grid h-9 w-10 place-items-center rounded-xl hover:bg-neutral-100">
-              <span className="text-neutral-500">⌕</span>
-            </button>
-            <div className="h-6 w-px bg-neutral-100" />
-            <button className="grid h-9 w-10 place-items-center rounded-xl hover:bg-neutral-100">
-              <span className="text-neutral-500">▢</span>
-            </button>
-            <button className="grid h-9 w-10 place-items-center rounded-xl hover:bg-neutral-100">
-              <span className="text-neutral-500">⚙</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>

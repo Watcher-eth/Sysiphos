@@ -131,7 +131,7 @@ function TodoMark({ status }: { status: TodoStatus }) {
     return (
       <span
         className={cn(
-          "grid h-[22px] w-[22px] shrink-0 place-items-center rounded-[6px] border bg-white p-[1.5px]",
+          "grid h-[19px] w-[19px] shrink-0 place-items-center rounded-[6px] border bg-white p-[1.5px]",
           status === "not_started" ? "border-neutral-300" : status === "in_progress" ? "border-sky-500" : "border-emerald-500"
         )}
       >
@@ -172,7 +172,7 @@ function TodoMark({ status }: { status: TodoStatus }) {
   
                   <span
                     className={cn(
-                      "truncate text-[17px] leading-6",
+                      "truncate text-[16.5px] leading-6",
                       status === "done"
                         ? "text-neutral-400 line-through"
                         : "text-neutral-900"
