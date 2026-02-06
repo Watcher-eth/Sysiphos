@@ -2,7 +2,7 @@
 import type { ProseProgram, Stmt, Expr } from "./ast";
 import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
-import type { SessionAdapter, SessionTurnResult } from "./sessionAdapter";
+import type { SessionAdapter } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../s3";
 
 type Manifest = {
@@ -35,11 +35,19 @@ function extractResultText(raw: string) {
   return m[1].trim();
 }
 
+// persist can be "true" | "project" | "user" | "some/path" | undefined
 function isPersistEnabled(persist?: string): boolean {
   if (!persist) return false;
-  // In OpenProse syntax, persist can be "true" | "project" | "user" | custom string path.
-  // In runner, anything set means “persist on”.
-  return persist === "true" || persist === "project" || persist === "user" || persist.length > 0;
+  const p = persist.trim().toLowerCase();
+  if (!p) return false;
+  if (p === "false" || p === "0" || p === "off" || p === "no") return false;
+  return true;
+}
+
+function parseSessionIdFromMemory(memoryText: string | null): string | undefined {
+  if (!memoryText) return undefined;
+  const m = memoryText.match(/^\s*session_id:\s*([^\n]+)\s*$/m);
+  return m ? m[1].trim() : undefined;
 }
 
 export async function executeProse(args: {
@@ -98,11 +106,22 @@ export async function executeProse(args: {
     const agent = args2.agentName ? program.agents[args2.agentName] : undefined;
 
     const persistOn = isPersistEnabled(agent?.persist);
-    const shouldLoadMemory = args2.isResume && args2.agentName && persistOn;
+    const wantsResume = Boolean(args2.isResume && args2.agentName && persistOn);
 
-    // Runner “agent memory” (your own file) is separate from Claude “session resume”.
-    const memoryKey = shouldLoadMemory ? s3AgentMemoryKey(st.runId, args2.agentName!) : null;
+    const memoryKey = wantsResume ? s3AgentMemoryKey(st.runId, args2.agentName!) : null;
     const memoryText = memoryKey ? await getTextIfExists(memoryKey) : null;
+
+    // Durable sessionId resolution:
+    // 1) in-memory map (same runner process)
+    // 2) parse from persisted memory file (runner restarts)
+    const priorSessionId =
+      wantsResume && args2.agentName
+        ? st.agentSessionIds.get(args2.agentName) ?? parseSessionIdFromMemory(memoryText)
+        : undefined;
+
+    if (priorSessionId && args2.agentName && persistOn) {
+      st.agentSessionIds.set(args2.agentName, priorSessionId);
+    }
 
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({
       name: b.name,
@@ -116,23 +135,24 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-    // Claude session resume (V2):
-    // if we have an existing sessionId for this agent and caller requested resume, use it
-    const priorSessionId =
-      args2.isResume && args2.agentName ? st.agentSessionIds.get(args2.agentName) : undefined;
-
-    const session = priorSessionId
-      ? await adapter.resumeSession({
-          sessionId: priorSessionId,
-          model: agent?.model,
-          system: promptParts.system,
-          memoryText,
-        })
-      : await adapter.createSession({
-          model: agent?.model,
-          system: promptParts.system,
-          memoryText: memoryText ?? null,
-        });
+    // Provider session:
+    // - If resume requested and we have a priorSessionId -> resumeSession
+    // - Else -> createSession (fresh)
+    const session =
+      wantsResume && priorSessionId
+        ? await adapter.resumeSession({
+            sessionId: priorSessionId,
+            model: agent?.model,
+            system: promptParts.system,
+            memoryText,
+            idempotencyKey: args2.agentName ? `${st.runId}:${args2.agentName}:resume` : null,
+          })
+        : await adapter.createSession({
+            model: agent?.model,
+            system: promptParts.system,
+            memoryText: wantsResume ? memoryText ?? null : null,
+            idempotencyKey: args2.agentName ? `${st.runId}:${args2.agentName}:create` : null,
+          });
 
     await session.send(promptParts.user);
 
@@ -150,18 +170,19 @@ export async function executeProse(args: {
 
     session.close();
 
-    // Persist Claude sessionId for this agent if persist is enabled
+    // capture sessionId for future resume
     if (args2.agentName && persistOn && latestSessionId) {
       st.agentSessionIds.set(args2.agentName, latestSessionId);
     }
 
-    // Memory writeback (run-scoped) for persistent agents only
+    // run-scoped memory writeback for persistent agents
     if (args2.agentName && persistOn) {
+      const sidLine = latestSessionId ? `session_id: ${latestSessionId}\n` : "";
       const mem =
         `# memory\n\n` +
+        sidLine +
         `last_task: ${args2.title}\n` +
-        `updated_at: ${new Date().toISOString()}\n` +
-        (latestSessionId ? `session_id: ${latestSessionId}\n` : "");
+        `updated_at: ${new Date().toISOString()}\n`;
       const key = s3AgentMemoryKey(st.runId, args2.agentName);
       await putText(key, mem, "text/markdown");
     }
