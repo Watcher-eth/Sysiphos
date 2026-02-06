@@ -140,11 +140,19 @@ export async function writeBinding(args: {
 // Runner session: spawn + persist session + write bindings.
 // (No billing settle here; workflow finally does it.)
 export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
+  const agentType = "mock";
+
+  // ✅ stable across Temporal retries
+  const idempotencyKey = `spawn:${args.runId}:${args.programHash}:${agentType}`;
+
   const resp = await spawnRunnerSession({
     runId: args.runId,
     programHash: args.programHash,
-    agentType: "mock",
+    agentType,
+    idempotencyKey,
   });
+
+  if (!resp?.sessionId) throw new Error("runner_missing_sessionId");
 
   // Idempotent under retries (requires uniq index on (run_id, runner_session_id))
   await db
@@ -152,7 +160,7 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
     .values({
       runId: args.runId as any,
       runnerSessionId: resp.sessionId,
-      agentType: "mock",
+      agentType,
       status: resp.status === "succeeded" ? "succeeded" : "failed",
       endedAt: new Date(),
     } as any)
@@ -186,9 +194,6 @@ export async function settleRunBilling(args: {
 }) {
   const workspaceId = await getRunWorkspaceId(args.runId);
 
-  // Policy: always charge at least 1 unless usage provides cost.
-  // If you want canceled to be free:
-  // const usageCost = args.status === "canceled" ? 0 : Number(args.usage?.costCredits ?? 1);
   const usageCost = Number(args.usage?.costCredits ?? 1);
   const actualCost = Math.max(0, usageCost);
 
@@ -199,8 +204,6 @@ export async function settleRunBilling(args: {
     reason: `settle_${args.status}`,
   });
 
-  // Optional: emit an event so UI can show billing reconciliation.
-  // (Add BILLING_SETTLED to schema.RunEventType for real typing.)
   try {
     await writeEvent({
       runId: args.runId,

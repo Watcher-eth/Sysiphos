@@ -9,6 +9,10 @@ type Manifest = {
   runId: string;
   programHash: string;
   programText: string;
+
+  // ✅ who is driving this execution (user/participant/system)
+  principalId?: string;
+
   toolAllowlist: string[];
   capabilities: string[];
   files: Array<{ contentRef: string; path: string; mode: "ro" | "rw"; sha256?: string | null }>;
@@ -25,8 +29,8 @@ function s3BindingKey(runId: string, name: string) {
   return `${process.env.S3_PREFIX ?? "runs"}/${runId}/bindings/${name}.txt`;
 }
 
-function s3AgentMemoryKey(runId: string, agentName: string) {
-  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/agents/${agentName}/memory.md`;
+function s3AgentMemoryKey(runId: string, principalId: string, agentName: string) {
+  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/principals/${principalId}/agents/${agentName}/memory.md`;
 }
 
 function extractResultText(raw: string) {
@@ -50,6 +54,10 @@ function parseSessionIdFromMemory(memoryText: string | null): string | undefined
   return m ? m[1].trim() : undefined;
 }
 
+function keyForAgent(principalId: string, agentName: string) {
+  return `${principalId}:${agentName}`;
+}
+
 export async function executeProse(args: {
   manifest: Manifest;
   program: ProseProgram;
@@ -57,6 +65,8 @@ export async function executeProse(args: {
 }): Promise<ExecResult> {
   const startedAt = Date.now();
   const { manifest, program, adapter } = args;
+
+  const principalId = (manifest.principalId?.trim() || "system").slice(0, 128);
 
   const st: RuntimeState & { agentSessionIds: Map<string, string> } = {
     runId: manifest.runId,
@@ -103,24 +113,27 @@ export async function executeProse(args: {
   }
 
   async function runSession(args2: { title: string; agentName?: string; isResume: boolean }): Promise<string> {
+    const agentName = args2.agentName ?? "default";
     const agent = args2.agentName ? program.agents[args2.agentName] : undefined;
 
     const persistOn = isPersistEnabled(agent?.persist);
     const wantsResume = Boolean(args2.isResume && args2.agentName && persistOn);
 
-    const memoryKey = wantsResume ? s3AgentMemoryKey(st.runId, args2.agentName!) : null;
+    const agentKey = keyForAgent(principalId, agentName);
+
+    const memoryKey = wantsResume ? s3AgentMemoryKey(st.runId, principalId, agentName) : null;
     const memoryText = memoryKey ? await getTextIfExists(memoryKey) : null;
 
     // Durable sessionId resolution:
     // 1) in-memory map (same runner process)
     // 2) parse from persisted memory file (runner restarts)
     const priorSessionId =
-      wantsResume && args2.agentName
-        ? st.agentSessionIds.get(args2.agentName) ?? parseSessionIdFromMemory(memoryText)
+      wantsResume
+        ? st.agentSessionIds.get(agentKey) ?? parseSessionIdFromMemory(memoryText)
         : undefined;
 
-    if (priorSessionId && args2.agentName && persistOn) {
-      st.agentSessionIds.set(args2.agentName, priorSessionId);
+    if (priorSessionId && persistOn) {
+      st.agentSessionIds.set(agentKey, priorSessionId);
     }
 
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({
@@ -135,9 +148,6 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-    // Provider session:
-    // - If resume requested and we have a priorSessionId -> resumeSession
-    // - Else -> createSession (fresh)
     const session =
       wantsResume && priorSessionId
         ? await adapter.resumeSession({
@@ -145,13 +155,13 @@ export async function executeProse(args: {
             model: agent?.model,
             system: promptParts.system,
             memoryText,
-            idempotencyKey: args2.agentName ? `${st.runId}:${args2.agentName}:resume` : null,
+            idempotencyKey: `${st.runId}:${agentKey}:resume`,
           })
         : await adapter.createSession({
             model: agent?.model,
             system: promptParts.system,
             memoryText: wantsResume ? memoryText ?? null : null,
-            idempotencyKey: args2.agentName ? `${st.runId}:${args2.agentName}:create` : null,
+            idempotencyKey: `${st.runId}:${agentKey}:create`,
           });
 
     await session.send(promptParts.user);
@@ -170,20 +180,21 @@ export async function executeProse(args: {
 
     session.close();
 
-    // capture sessionId for future resume
-    if (args2.agentName && persistOn && latestSessionId) {
-      st.agentSessionIds.set(args2.agentName, latestSessionId);
+    if (persistOn && latestSessionId) {
+      st.agentSessionIds.set(agentKey, latestSessionId);
     }
 
-    // run-scoped memory writeback for persistent agents
-    if (args2.agentName && persistOn) {
+    // run-scoped, principal-scoped memory writeback for persistent agents
+    if (persistOn) {
       const sidLine = latestSessionId ? `session_id: ${latestSessionId}\n` : "";
       const mem =
         `# memory\n\n` +
         sidLine +
+        `principal_id: ${principalId}\n` +
+        `agent: ${agentName}\n` +
         `last_task: ${args2.title}\n` +
         `updated_at: ${new Date().toISOString()}\n`;
-      const key = s3AgentMemoryKey(st.runId, args2.agentName);
+      const key = s3AgentMemoryKey(st.runId, principalId, agentName);
       await putText(key, mem, "text/markdown");
     }
 

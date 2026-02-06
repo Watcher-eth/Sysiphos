@@ -9,6 +9,9 @@ type SpawnSessionBody = {
   runId: string;
   programHash: string;
 
+  // ✅ who is driving this run execution (for per-user/session isolation)
+  principalId?: string;
+
   agentType?: string;
 
   // Phase 2+: can override manifest pieces, but if you do, you MUST also provide programText.
@@ -22,6 +25,9 @@ type SpawnSessionBody = {
     size?: number;
   }>;
   programText?: string;
+
+  // ✅ allow client to pass through an idempotency key (optional for runner)
+  idempotencyKey?: string;
 };
 
 function json(body: any, status = 200) {
@@ -46,7 +52,7 @@ type MaterializeResponse = {
   manifest?: {
     runId: string;
     programHash: string;
-    programText: string; // ✅ required now
+    programText: string;
     toolAllowlist: string[];
     capabilities: string[];
     files: Array<{
@@ -88,7 +94,6 @@ async function fetchMaterializeManifest(
 
   const parsed = JSON.parse(text) as MaterializeResponse;
   if (!parsed.ok || !parsed.manifest) throw new HttpError(500, parsed.error ?? "materialize_invalid");
-
   if (!parsed.manifest.programText) throw new HttpError(500, "materialize_missing_programText");
 
   return parsed.manifest;
@@ -113,6 +118,8 @@ Bun.serve({
         if (!runId) throw new HttpError(400, "Missing runId");
         if (!programHash) throw new HttpError(400, "Missing programHash");
 
+        const principalId = (body.principalId?.trim() || "system").slice(0, 128);
+
         // If caller overrides allowlist/files, require they also pass programText (otherwise you can't execute).
         const hasOverrides = Boolean(body.toolAllowlist || body.files || body.programText);
 
@@ -126,7 +133,9 @@ Bun.serve({
         const manifest = {
           runId,
           programHash,
-          programText, // ✅ canonical field
+          principalId, // ✅ new
+
+          programText,
 
           toolAllowlist: body.toolAllowlist ?? fetched?.toolAllowlist ?? [],
           capabilities: fetched?.capabilities ?? [],
