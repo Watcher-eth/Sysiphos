@@ -1,6 +1,7 @@
-import { and, eq, max } from "drizzle-orm";
+// worker/src/activities.ts
+import { eq, max, and } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
-import { spawnSessionAndWait } from "./runnerClient";
+import { spawnRunnerSession } from "./runnerClient";
 
 async function nextSeq(runId: string): Promise<number> {
   const row = await db
@@ -114,8 +115,9 @@ export async function writeBinding(args: {
   });
 }
 
-export async function SpawnSessionAndWait(args: { runId: string }) {
-  const resp = await spawnSessionAndWait(args.runId);
+// ✅ This is the Temporal activity signature
+export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
+  const resp = await spawnRunnerSession({ runId: args.runId, programHash: args.programHash, agentType: "mock" });
 
   await db.insert(schema.agentSessions).values({
     runId: args.runId as any,

@@ -180,7 +180,8 @@ export const accounts = pgTable(
     | "failed"
     | "canceled";
   
-  export const runs = pgTable(
+// --- runs: add pinned program fields
+export const runs = pgTable(
     "runs",
     {
       id: uuid("id").primaryKey().defaultRandom(),
@@ -188,17 +189,15 @@ export const accounts = pgTable(
         .notNull()
         .references(() => workspaces.id, { onDelete: "cascade" }),
   
-      // source of run
-      sourceType: text("source_type").notNull(), // "task" | "workflow_version"
+      sourceType: text("source_type").notNull(),
       taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
       workflowVersionId: uuid("workflow_version_id").references(() => workflowVersions.id, { onDelete: "set null" }),
   
-      parentRunId: uuid("parent_run_id"),  
+      parentRunId: uuid("parent_run_id"),
       status: text("status").notNull().$type<RunStatus>().default("queued"),
       title: text("title").notNull(),
       description: text("description").notNull().default(""),
   
-      // Temporal linkage
       temporalWorkflowId: text("temporal_workflow_id"),
       temporalRunId: text("temporal_run_id"),
   
@@ -206,18 +205,37 @@ export const accounts = pgTable(
       createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   
-      // credits/budgeting (v1: optional)
       creditsBudget: integer("credits_budget"),
       creditsSpent: integer("credits_spent").notNull().default(0),
+  
+      // ✅ pin compiler result on run
+      compilerVersion: text("compiler_version"),
+      programHash: text("program_hash"),
     },
     (t) => ({
       byWorkspace: index("runs__workspace_idx").on(t.workspaceId),
       byTask: index("runs__task_idx").on(t.taskId),
       byWorkflowVersion: index("runs__workflow_version_idx").on(t.workflowVersionId),
+      byProgram: index("runs__program_idx").on(t.programHash),
     })
   );
   
-  // Run mounts: filesystem paths requested by user (future desktop companion enforces actual access)
+  // --- run_programs: make it authoritative
+  export const runPrograms = pgTable("run_programs", {
+    runId: uuid("run_id")
+      .primaryKey()
+      .references(() => runs.id, { onDelete: "cascade" }),
+  
+    compilerVersion: text("compiler_version").notNull(),
+    sourceHash: text("source_hash").notNull(), // hash of compiler inputs (task/workflow snapshot + inputs)
+  
+    programText: text("program_text").notNull(),
+    programSource: text("program_source").notNull().default("generated"),
+    programHash: text("program_hash").notNull(),
+  
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  });
+    // Run mounts: filesystem paths requested by user (future desktop companion enforces actual access)
   export type MountType = "file" | "folder" | "path" | "multi";
   
   export const runMounts = pgTable(
@@ -241,18 +259,7 @@ export const accounts = pgTable(
     })
   );
   
-  // Programs / prose text stored per run (Phase 1 uses dummy; later you’ll store compiled prose)
-  export const runPrograms = pgTable("run_programs", {
-    runId: uuid("run_id")
-      .primaryKey()
-      .references(() => runs.id, { onDelete: "cascade" }),
-  
-    programText: text("program_text").notNull(), // .prose
-    programSource: text("program_source").notNull().default("generated"),
-    programHash: text("program_hash"),
-  
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  });
+
   
   export type BindingKind = "input" | "let" | "const" | "output";
   
@@ -447,5 +454,57 @@ export const agentMemoryItems = pgTable(
   },
   (t) => ({
     byWorkspace: index("agent_memory_items__workspace_idx").on(t.workspaceId, t.createdAt),
+  })
+);
+
+export type RunPermissionCapability =
+  | "tools.use"
+  | "files.read"
+  | "files.write"
+  | "net.egress"
+  | "connectors.use";
+
+export const runPermissions = pgTable(
+  "run_permissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+
+    capability: text("capability").notNull().$type<RunPermissionCapability>(),
+    // optional scoping (e.g. tool name, connector id, domain allowlist, etc)
+    scope: text("scope"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byRun: index("run_permissions__run_idx").on(t.runId),
+  })
+);
+
+export type RunFileMode = "ro" | "rw";
+
+export const runFiles = pgTable(
+  "run_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+
+    contentRef: text("content_ref").notNull(), // object store key
+    path: text("path").notNull(), // path inside runner workspace
+    mode: text("mode").notNull().$type<RunFileMode>().default("ro"),
+
+    sha256: text("sha256"),
+    mime: text("mime"),
+    size: integer("size"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byRun: index("run_files__run_idx").on(t.runId),
+    uniq: uniqueIndex("run_files__uniq").on(t.runId, t.path),
   })
 );

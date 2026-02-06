@@ -7,7 +7,9 @@ export function mustEnv(name: string): string {
   export const env = {
     port: Number(process.env.PORT ?? 8787),
     sharedSecret: mustEnv("RUNNER_SHARED_SECRET"),
-  
+    runnerSharedSecret: mustEnv("RUNNER_SHARED_SECRET"),
+  controlPlaneBaseUrl: mustEnv("CONTROL_PLANE_BASE_URL"), // e.g. http://localhost:3000
+
     s3Endpoint: mustEnv("S3_ENDPOINT"),
     s3Region: process.env.S3_REGION ?? "auto",
     s3AccessKeyId: mustEnv("S3_ACCESS_KEY_ID"),

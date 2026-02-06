@@ -1,3 +1,4 @@
+// worker/src/runnerClient.ts
 export type RunnerSpawnResponse = {
   ok: boolean;
   sessionId: string;
@@ -14,10 +15,11 @@ export type RunnerSpawnResponse = {
   };
 };
 
-export async function spawnSessionAndWait(runId: string): Promise<RunnerSpawnResponse> {
-  const baseUrl = process.env.RUNNER_URL!;
-  const token = process.env.RUNNER_SHARED_SECRET!;
-  console.log("[worker] RUNNER_URL =", baseUrl);
+export async function spawnRunnerSession(args: { runId: string; programHash: string; agentType?: string }) {
+  const { runId, programHash, agentType = "mock" } = args;
+
+  const baseUrl = process.env.RUNNER_URL;
+  const token = process.env.RUNNER_SHARED_SECRET;
 
   if (!baseUrl) throw new Error("RUNNER_URL missing");
   if (!token) throw new Error("RUNNER_SHARED_SECRET missing");
@@ -28,7 +30,7 @@ export async function spawnSessionAndWait(runId: string): Promise<RunnerSpawnRes
       "content-type": "application/json",
       "x-runner-token": token,
     },
-    body: JSON.stringify({ runId, agentType: "mock" }),
+    body: JSON.stringify({ runId, programHash, agentType }),
   });
 
   const text = await res.text();

@@ -43,6 +43,13 @@
       "when": 1770338704916,
       "tag": "0005_grey_doctor_strange",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1770345494213,
+      "tag": "0006_little_omega_red",
+      "breakpoints": true
     }
   ]
 }

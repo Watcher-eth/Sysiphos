@@ -1,3 +1,4 @@
+// src/pages/api/runs/[runId]/start.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
@@ -6,8 +7,18 @@ import { appendRunEvent } from "@/lib/sse";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
-import { Connection, Client, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
-import { PROSE_RUN_WORKFLOW_NAME, PROSE_TASK_QUEUE, proseWorkflowId } from "@/lib/temporal/names";
+import {
+  Connection,
+  Client,
+  WorkflowExecutionAlreadyStartedError,
+} from "@temporalio/client";
+import {
+  PROSE_RUN_WORKFLOW_NAME,
+  PROSE_TASK_QUEUE,
+  proseWorkflowId,
+} from "@/lib/temporal/names";
+
+import { compileAndPinRun } from "@/lib/runs/compileRun";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
@@ -19,7 +30,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const runId = req.query.runId as string;
   if (!runId) return res.status(400).send("Missing runId");
 
-  // load run
+  // load run (incl workspace for membership check + existing temporal workflow id)
   const runRow = await db
     .select({
       id: schema.runs.id,
@@ -30,7 +41,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     .where(eq(schema.runs.id, runId as any))
     .limit(1);
 
-  if (!runRow[0]) return res.status(404).send("Run not found");
+  const run = runRow[0];
+  if (!run) return res.status(404).send("Run not found");
 
   // membership check
   const membership = await db
@@ -38,7 +50,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     .from(schema.workspaceMembers)
     .where(
       and(
-        eq(schema.workspaceMembers.workspaceId, runRow[0].workspaceId),
+        eq(schema.workspaceMembers.workspaceId, run.workspaceId),
         eq(schema.workspaceMembers.userId, userId as any)
       )
     )
@@ -46,26 +58,58 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (!membership[0]) return res.status(403).send("Forbidden");
 
-  // ensure program exists (keep as-is for now)
-  const existingProgram = await db
-    .select({ runId: schema.runPrograms.runId })
+  // ensure pinned program exists; if missing, compile + pin (idempotent)
+  const pinned0 = await db
+    .select({
+      programHash: schema.runs.programHash,
+      compilerVersion: schema.runs.compilerVersion,
+    })
+    .from(schema.runs)
+    .where(eq(schema.runs.id, runId as any))
+    .limit(1);
+
+  if (!pinned0[0]?.programHash || !pinned0[0]?.compilerVersion) {
+    const out = await compileAndPinRun({ runId, userId });
+    if (!out.ok) return res.status(out.status).send(out.error);
+  }
+
+  // re-read pinned after potential compile
+  const pinned = await db
+    .select({
+      programHash: schema.runs.programHash,
+      compilerVersion: schema.runs.compilerVersion,
+    })
+    .from(schema.runs)
+    .where(eq(schema.runs.id, runId as any))
+    .limit(1);
+
+  if (!pinned[0]?.programHash || !pinned[0]?.compilerVersion) {
+    return res.status(500).send("Compile failed to pin program");
+  }
+
+  // verify pinned program matches authoritative run_programs row
+  const programRow = await db
+    .select({
+      programHash: schema.runPrograms.programHash,
+    })
     .from(schema.runPrograms)
     .where(eq(schema.runPrograms.runId, runId as any))
     .limit(1);
 
-  if (!existingProgram[0]) {
-    await db.insert(schema.runPrograms).values({
-      runId: runId as any,
-      programText: `# demo.prose\nsession "Fake session"\noutput done = "ok"\n`,
-      programSource: "generated",
-    });
+  if (!programRow[0] || programRow[0].programHash !== pinned[0].programHash) {
+    return res.status(409).send("Pinned program mismatch. Re-compile.");
   }
 
   // RUN_CREATED only once
   const alreadyCreated = await db
     .select({ id: schema.runEvents.id })
     .from(schema.runEvents)
-    .where(and(eq(schema.runEvents.runId, runId as any), eq(schema.runEvents.type, "RUN_CREATED")))
+    .where(
+      and(
+        eq(schema.runEvents.runId, runId as any),
+        eq(schema.runEvents.type, "RUN_CREATED")
+      )
+    )
     .limit(1);
 
   if (!alreadyCreated[0]) {
@@ -79,17 +123,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     .where(eq(schema.runs.id, runId as any));
 
   // don't overwrite workflow id if already set
-  const workflowId = runRow[0].temporalWorkflowId ?? proseWorkflowId(runId);
+  const workflowId = run.temporalWorkflowId ?? proseWorkflowId(runId);
 
-  if (!runRow[0].temporalWorkflowId) {
+  if (!run.temporalWorkflowId) {
     await db
       .update(schema.runs)
       .set({ temporalWorkflowId: workflowId })
       .where(eq(schema.runs.id, runId as any));
   }
-  console.log("TEMPORAL_ADDRESS =", process.env.TEMPORAL_ADDRESS);
-  console.log("TEMPORAL_NAMESPACE =", process.env.TEMPORAL_NAMESPACE);
-  console.log("TEMPORAL_TASK_QUEUE =", process.env.TEMPORAL_TASK_QUEUE);
 
   const conn = await Connection.connect({ address: process.env.TEMPORAL_ADDRESS! });
   const client = new Client({
@@ -101,7 +142,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     await client.workflow.start(PROSE_RUN_WORKFLOW_NAME, {
       taskQueue: process.env.TEMPORAL_TASK_QUEUE ?? PROSE_TASK_QUEUE,
       workflowId,
-      args: [{ runId }],
+      args: [{ runId, programHash: pinned[0].programHash }],
     });
   } catch (e) {
     if (!(e instanceof WorkflowExecutionAlreadyStartedError)) throw e;

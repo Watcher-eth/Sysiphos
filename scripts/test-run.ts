@@ -1,11 +1,17 @@
 const WEB_URL = process.env.WEB_URL ?? "http://localhost:3000";
-const COOKIE = process.env.COOKIE;
+const COOKIE = process.env.COOKIE ?? "next-auth.session-token=adf6029b-05d1-42e9-b2a3-cf9531a53282";
 if (!COOKIE) throw new Error("COOKIE env var missing (set to next-auth.session-token=...)");
+
 type Json = any;
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra ?? {}) };
   if (COOKIE) h["Cookie"] = COOKIE; // IMPORTANT: capital C
   return h;
+}
+async function compileRun(runId: string) {
+  return await http(`/api/runs/${encodeURIComponent(runId)}/compile`, {
+    method: "POST",
+  });
 }
 
 async function http(path: string, init?: RequestInit) {
@@ -23,8 +29,10 @@ async function http(path: string, init?: RequestInit) {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
   return json ?? text;
 }
-
 async function createRun() {
+  const taskId = process.env.TASK_ID;
+  if (!taskId) throw new Error("TASK_ID env var missing");
+
   return await http(`/api/runs/create`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -32,8 +40,8 @@ async function createRun() {
       title: "E2E demo run",
       description: "created from scripts/test-run.ts",
       workspaceId: process.env.WORKSPACE_ID,
-    }),
-  });
+      taskId: process.env.TASK_ID, // add this
+    }),  });
 }
 
 async function startRun(runId: string) {
@@ -147,6 +155,9 @@ async function main() {
 
   const runId = created.runId as string;
   console.log("runId =", runId);
+
+  console.log("Compiling run…");
+  console.log(await compileRun(runId));
 
   console.log("Starting run (first)…");
   console.log(await startRun(runId));
