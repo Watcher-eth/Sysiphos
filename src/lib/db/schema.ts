@@ -385,5 +385,67 @@ export const accounts = pgTable(
     },
     (t) => ({
       byRun: index("todos__run_idx").on(t.runId, t.order),
+      uniq: uniqueIndex("todos__uniq").on(t.runId, t.order),
     })
   );
+
+  export const contentBlobs = pgTable(
+    "content_blobs",
+    {
+      id: uuid("id").primaryKey().defaultRandom(),
+      contentRef: text("content_ref").notNull(), // bucket key (or full URI later)
+  
+      sha256: text("sha256"),
+      mime: text("mime"),
+      size: integer("size"),
+  
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => ({
+      uniq: uniqueIndex("content_blobs__uniq").on(t.contentRef),
+    })
+  );
+
+  export type AgentSessionStatus = "running" | "succeeded" | "failed" | "canceled";
+
+export const agentSessions = pgTable(
+  "agent_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+
+    runnerSessionId: text("runner_session_id").notNull(),
+    agentType: text("agent_type").notNull().default("mock"),
+    status: text("status").notNull().$type<AgentSessionStatus>().default("running"),
+
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => ({
+    byRun: index("agent_sessions__run_idx").on(t.runId),
+    uniq: uniqueIndex("agent_sessions__uniq").on(t.runnerSessionId),
+  })
+);
+
+export type MemoryScope = "workspace" | "task" | "run" | "session";
+export type MemoryKind = "note" | "fact" | "preference" | "decision" | "summary";
+
+export const agentMemoryItems = pgTable(
+  "agent_memory_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+
+    scope: text("scope").notNull().$type<MemoryScope>().default("workspace"),
+    kind: text("kind").notNull().$type<MemoryKind>().default("note"),
+
+    text: text("text").notNull(),
+    sourceRunId: uuid("source_run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byWorkspace: index("agent_memory_items__workspace_idx").on(t.workspaceId, t.createdAt),
+  })
+);
