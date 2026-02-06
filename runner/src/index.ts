@@ -68,7 +68,7 @@ async function fetchMaterializeManifest(runId: string, programHash: string): Pro
   const res = await fetch(url.toString(), {
     method: "GET",
     headers: {
-      "x-runner-token": env.runnerSharedSecret,
+      "x-runner-token": env.sharedSecret,
     },
   });
 

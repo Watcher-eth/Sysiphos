@@ -9,7 +9,7 @@ export type RunnerSpawnResponse = {
   ok: boolean;
   sessionId: string;
   status: "succeeded" | "failed";
-  outputs: {
+  outputs: Array<{
     bindingName: string;
     kind: "output" | "input" | "let" | "const";
     contentRef: string;
@@ -18,7 +18,7 @@ export type RunnerSpawnResponse = {
     sha256?: string;
     preview?: string;
     summary?: string;
-  };
+  }>;
   usage?: RunnerUsage;
 };
 
@@ -46,5 +46,14 @@ export async function spawnRunnerSession(args: {
 
   const text = await res.text();
   if (!res.ok) throw new Error(`Runner ${res.status}: ${text}`);
-  return JSON.parse(text) as RunnerSpawnResponse;
+
+  const parsed = JSON.parse(text) as RunnerSpawnResponse;
+  if (!parsed?.ok) throw new Error(`Runner error: ${parsed?.ok === false ? "not_ok" : "invalid_response"}`);
+
+  // Normalize: ensure outputs is always an array
+  if (!Array.isArray((parsed as any).outputs)) {
+    (parsed as any).outputs = [];
+  }
+
+  return parsed;
 }

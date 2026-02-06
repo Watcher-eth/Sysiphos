@@ -1,4 +1,3 @@
-// runner/src/s3.ts
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { env } from "./env";
 import { createHash } from "node:crypto";
@@ -6,6 +5,7 @@ import { createWriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Readable } from "node:stream";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 export type PutResult = {
@@ -47,7 +47,7 @@ type DownloadArgs = {
   maxBytes?: number;
 };
 
-class ByteLimitTransform extends (await import("node:stream")).Transform {
+class ByteLimitTransform extends Transform {
   private seen = 0;
   constructor(private maxBytes: number) {
     super();
@@ -60,6 +60,17 @@ class ByteLimitTransform extends (await import("node:stream")).Transform {
     }
     this.push(chunk);
     cb();
+  }
+}
+
+class HashTapTransform extends Transform {
+  constructor(private onChunk: (buf: Buffer) => void) {
+    super();
+  }
+  _transform(chunk: any, _enc: BufferEncoding, cb: (err?: Error | null, data?: any) => void) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    this.onChunk(buf);
+    cb(null, buf);
   }
 }
 
@@ -82,14 +93,9 @@ export async function downloadToFile(args: DownloadArgs): Promise<{ sha256: stri
 
   const readable = resp.Body as Readable;
 
-  // Hash + optional size cap while streaming
-  const hashTap = new (await import("node:stream")).Transform({
-    transform(chunk, _enc, cb) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += buf.length;
-      hasher.update(buf);
-      cb(null, buf);
-    },
+  const hashTap = new HashTapTransform((buf) => {
+    size += buf.length;
+    hasher.update(buf);
   });
 
   const limiter = maxBytes ? new ByteLimitTransform(maxBytes) : null;
@@ -109,3 +115,27 @@ export async function downloadToFile(args: DownloadArgs): Promise<{ sha256: stri
 
   return { sha256, size };
 }
+
+async function readBodyToString(body: Readable): Promise<string> {
+    const chunks: Buffer[] = [];
+    for await (const c of body) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+    return Buffer.concat(chunks).toString("utf8");
+  }
+  
+  export async function getTextIfExists(key: string): Promise<string | null> {
+    try {
+      const resp = await s3.send(
+        new GetObjectCommand({
+          Bucket: env.s3Bucket,
+          Key: key,
+        })
+      );
+      if (!resp.Body) return null;
+      return await readBodyToString(resp.Body as Readable);
+    } catch (e: any) {
+      // S3-compatible backends vary; safest: treat any miss-like error as null
+      const msg = String(e?.name ?? e?.message ?? "");
+      if (msg.includes("NoSuchKey") || msg.includes("NotFound")) return null;
+      return null;
+    }
+  }

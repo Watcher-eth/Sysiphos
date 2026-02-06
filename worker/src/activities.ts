@@ -1,3 +1,5 @@
+// worker/src/activities.ts (or wherever this file lives)
+
 import { eq, max } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
 import { spawnRunnerSession } from "./runnerClient";
@@ -136,7 +138,7 @@ export async function writeBinding(args: {
   });
 }
 
-// Runner session: spawn + persist session + write binding.
+// Runner session: spawn + persist session + write bindings.
 // (No billing settle here; workflow finally does it.)
 export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
   const resp = await spawnRunnerSession({
@@ -145,25 +147,35 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
     agentType: "mock",
   });
 
-  await db.insert(schema.agentSessions).values({
-    runId: args.runId as any,
-    runnerSessionId: resp.sessionId,
-    agentType: "mock",
-    status: resp.status === "succeeded" ? "succeeded" : "failed",
-    endedAt: new Date(),
-  } as any);
+  // Idempotent under retries (requires uniq index on (run_id, runner_session_id))
+  await db
+    .insert(schema.agentSessions)
+    .values({
+      runId: args.runId as any,
+      runnerSessionId: resp.sessionId,
+      agentType: "mock",
+      status: resp.status === "succeeded" ? "succeeded" : "failed",
+      endedAt: new Date(),
+    } as any)
+    // @ts-ignore
+    .onConflictDoNothing({
+      target: [schema.agentSessions.runId, schema.agentSessions.runnerSessionId],
+    });
 
-  await writeBinding({
-    runId: args.runId,
-    name: resp.outputs.bindingName,
-    kind: resp.outputs.kind,
-    contentRef: resp.outputs.contentRef,
-    contentPreview: resp.outputs.preview,
-    summary: resp.outputs.summary,
-    sha256: resp.outputs.sha256,
-    size: resp.outputs.size,
-    mime: resp.outputs.mime,
-  });
+  const outputs = Array.isArray(resp.outputs) ? resp.outputs : [];
+  for (const o of outputs) {
+    await writeBinding({
+      runId: args.runId,
+      name: o.bindingName,
+      kind: o.kind,
+      contentRef: o.contentRef,
+      contentPreview: o.preview,
+      summary: o.summary,
+      sha256: o.sha256,
+      size: o.size,
+      mime: o.mime,
+    });
+  }
 
   return resp;
 }
@@ -175,12 +187,31 @@ export async function settleRunBilling(args: {
 }) {
   const workspaceId = await getRunWorkspaceId(args.runId);
 
-  const actualCost = Math.max(0, Number(args.usage?.costCredits ?? 1));
+  // Policy: always charge at least 1 unless usage provides cost
+  // (If you want canceled to cost 0, change to: args.status === "canceled" ? 0 : ...
+  const usageCost = Number(args.usage?.costCredits ?? 1);
+  const actualCost = Math.max(0, usageCost);
 
-  await settleRunHold({
+  const settled = await settleRunHold({
     workspaceId,
     runId: args.runId,
     actualCost,
     reason: `settle_${args.status}`,
   });
+
+  // Optional but recommended: emit an event so UI can show billing reconciliation
+  // (Add BILLING_SETTLED to RunEventType if you keep this.)
+  try {
+    await writeEvent({
+      runId: args.runId,
+      type: "BILLING_SETTLED" as any,
+      payload: {
+        status: args.status,
+        actualCost,
+        ...settled,
+      },
+    });
+  } catch {
+    // no-op if event type not added yet
+  }
 }

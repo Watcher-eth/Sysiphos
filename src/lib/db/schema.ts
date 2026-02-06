@@ -300,7 +300,12 @@ export const runs = pgTable(
     | "TODO_CREATED"
     | "TODO_UPDATED"
     | "ARTIFACT_CREATED"
-    | "ERROR";
+    | "ERROR"
+    | "RUN_STATUS"
+    | "STEP_STARTED"
+    | "STEP_COMPLETED"
+    | "STEP_FAILED"
+    | "STEP_CANCELED";
   
   export const runEvents = pgTable(
     "run_events",
