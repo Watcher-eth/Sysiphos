@@ -17,6 +17,8 @@ export type RunnerSpawnResponse = {
 export async function spawnSessionAndWait(runId: string): Promise<RunnerSpawnResponse> {
   const baseUrl = process.env.RUNNER_URL!;
   const token = process.env.RUNNER_SHARED_SECRET!;
+  console.log("[worker] RUNNER_URL =", baseUrl);
+
   if (!baseUrl) throw new Error("RUNNER_URL missing");
   if (!token) throw new Error("RUNNER_SHARED_SECRET missing");
 

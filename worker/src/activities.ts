@@ -1,5 +1,5 @@
 import { and, eq, max } from "drizzle-orm";
-import { db, schema } from "@/lib/db"; // if worker has access to root alias; otherwise use relative import
+import { db, schema } from "../../src/lib/db";
 import { spawnSessionAndWait } from "./runnerClient";
 
 async function nextSeq(runId: string): Promise<number> {

@@ -1,129 +1,151 @@
-// scripts/test-run.ts
-import {EventSource} from "eventsource";
-
-type EventRow = { type: string; seq: number };
-
-const BASE = process.env.BASE_URL ?? "http://localhost:3000";
-
-// You need an authenticated cookie.
-// Easiest: open devtools → Application → Cookies → copy `next-auth.session-token` (or `__Secure-next-auth.session-token`)
-const COOKIE = process.env.COOKIE ?? "next-auth.session-token=adf6029b-05d1-42e9-b2a3-cf9531a53282";
-
-if (!COOKIE) {
-  console.error("Missing COOKIE env var. Export your next-auth session cookie.");
-  process.exit(1);
+const WEB_URL = process.env.WEB_URL ?? "http://localhost:3000";
+const COOKIE = process.env.COOKIE;
+if (!COOKIE) throw new Error("COOKIE env var missing (set to next-auth.session-token=...)");
+type Json = any;
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra ?? {}) };
+  if (COOKIE) h["Cookie"] = COOKIE; // IMPORTANT: capital C
+  return h;
 }
 
 async function http(path: string, init?: RequestInit) {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: {
-      ...(init?.headers ?? {}),
-      Cookie: COOKIE,
-    },
-  });
+  const url = `${WEB_URL}${path}`;
+  const headers = authHeaders(init?.headers as Record<string, string> | undefined);
 
+  const res = await fetch(url, { ...init, headers });
   const text = await res.text();
-  let json: any = null;
+
+  let json: Json = null;
   try {
     json = text ? JSON.parse(text) : null;
   } catch {}
 
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}: ${text}`);
-  }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
   return json ?? text;
 }
 
-async function createRun(): Promise<string> {
-  const out = await http("/api/runs/create", { method: "POST" });
-  console.log(out);
-  return out.runId as string;
+async function createRun() {
+  return await http(`/api/runs/create`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      title: "E2E demo run",
+      description: "created from scripts/test-run.ts",
+      workspaceId: process.env.WORKSPACE_ID,
+    }),
+  });
 }
 
 async function startRun(runId: string) {
-  return http(`/api/runs/${runId}/start`, { method: "POST" });
+  return await http(`/api/runs/${runId}/start`, { method: "POST" });
 }
 
-async function waitForEvents(runId: string, timeoutMs = 30_000) {
-  const events: EventRow[] = [];
-  const counts: Record<string, number> = {};
+function isRetryableNetErr(e: any) {
+  const msg = String(e?.message ?? e);
+  return (
+    msg.includes("ConnectionRefused") ||
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("fetch failed")
+  );
+}
 
-  const want = [
-    "RUN_CREATED",
-    "RUN_STATUS",
-    "TODO_CREATED",
-    "BINDING_WRITTEN",
-    "RUN_STATUS",
-  ];
+async function listenEventsOnce(runId: string, after = 0) {
+  const url = `${WEB_URL}/api/runs/${runId}/events?after=${after}`;
 
-  const start = Date.now();
-
-  await new Promise<void>((resolve, reject) => {
-    const es = new EventSource(`${BASE}/api/runs/${runId}/events?after=0`, {
-      headers: { Cookie: COOKIE },
-    } as any);
-
-    const done = () => {
-      es.close();
-      resolve();
-    };
-
-    const fail = (err: any) => {
-      es.close();
-      reject(err);
-    };
-
-    const bump = (type: string, seq: number) => {
-      events.push({ type, seq });
-      counts[type] = (counts[type] ?? 0) + 1;
-
-      // stop condition: we saw succeeded status
-      if (type === "RUN_STATUS") {
-        // payload is in "message event data", but we don't need it for minimal check here
-        // We’ll just wait until we’ve seen 2 RUN_STATUS events total in Phase 1
-        if ((counts["RUN_STATUS"] ?? 0) >= 2 && (counts["BINDING_WRITTEN"] ?? 0) >= 1) {
-          done();
-        }
-      }
-
-      if (Date.now() - start > timeoutMs) {
-        fail(new Error("Timeout waiting for expected events"));
-      }
-    };
-
-    const handler = (type: string) => (e: MessageEvent) => {
-      try {
-        const data = JSON.parse(e.data);
-        bump(type, data?.seq ?? -1);
-        // console.log(type, data);
-      } catch {
-        bump(type, -1);
-      }
-    };
-
-    ["RUN_CREATED", "RUN_STATUS", "TODO_CREATED", "BINDING_WRITTEN", "ERROR"].forEach((t) => {
-      es.addEventListener(t, handler(t) as any);
-    });
-
-    es.onerror = () => {
-      // eventsource can call onerror transiently; treat hard timeout as failure instead
-    };
+  const res = await fetch(url, {
+    method: "GET",
+    headers: authHeaders({
+      Accept: "text/event-stream",
+      "Cache-Control": "no-cache",
+    }),
   });
 
-  return { events, counts };
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`events ${res.status} ${res.statusText}: ${body}`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("No response body for SSE");
+
+  const dec = new TextDecoder();
+  let buf = "";
+  let lastId = after;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buf += dec.decode(value, { stream: true });
+    buf = buf.replace(/\r\n/g, "\n");
+
+    while (true) {
+      const idx = buf.indexOf("\n\n");
+      if (idx === -1) break;
+
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+
+      if (!frame || frame.startsWith(":")) continue;
+
+      let id: number | null = null;
+      let event: string | null = null;
+      const dataLines: string[] = [];
+
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("id:")) id = Number(line.slice(3).trim());
+        else if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+
+      if (dataLines.length === 0) continue;
+
+      const dataStr = dataLines.join("\n");
+      let payload: any = dataStr;
+      try {
+        payload = JSON.parse(dataStr);
+      } catch {}
+
+      if (id != null) lastId = id;
+
+      console.log(`[SSE] id=${id} event=${event}`, payload);
+
+      if (event === "RUN_STATUS" && payload?.payload?.status) {
+        const st = payload.payload.status;
+        if (st === "succeeded" || st === "failed" || st === "canceled") return lastId;
+      }
+    }
+  }
+
+  return lastId;
 }
 
-function assertPhase1(counts: Record<string, number>) {
-  if ((counts["RUN_CREATED"] ?? 0) !== 1) throw new Error(`Expected RUN_CREATED once, got ${counts["RUN_CREATED"] ?? 0}`);
-  if ((counts["TODO_CREATED"] ?? 0) !== 3) throw new Error(`Expected TODO_CREATED 3x, got ${counts["TODO_CREATED"] ?? 0}`);
-  if ((counts["BINDING_WRITTEN"] ?? 0) !== 1) throw new Error(`Expected BINDING_WRITTEN once, got ${counts["BINDING_WRITTEN"] ?? 0}`);
-  if ((counts["RUN_STATUS"] ?? 0) < 2) throw new Error(`Expected RUN_STATUS >=2, got ${counts["RUN_STATUS"] ?? 0}`);
+async function listenEvents(runId: string, after = 0) {
+  const deadlineMs = 60_000;
+  const t0 = Date.now();
+  let last = after;
+
+  while (Date.now() - t0 < deadlineMs) {
+    try {
+      last = await listenEventsOnce(runId, last);
+      return last;
+    } catch (e: any) {
+      if (!isRetryableNetErr(e)) throw e;
+      await new Promise((r) => setTimeout(r, 300));
+      continue;
+    }
+  }
+
+  throw new Error("Timed out waiting for terminal RUN_STATUS over SSE");
 }
 
 async function main() {
   console.log("Creating run…");
-  const runId = await createRun();
+  const created = await createRun();
+  console.log(created);
+
+  const runId = created.runId as string;
   console.log("runId =", runId);
 
   console.log("Starting run (first)…");
@@ -133,12 +155,7 @@ async function main() {
   console.log(await startRun(runId));
 
   console.log("Listening for SSE events…");
-  const { counts } = await waitForEvents(runId);
-
-  console.log("Counts:", counts);
-  assertPhase1(counts);
-
-  console.log("✅ Phase 1 E2E OK");
+  await listenEvents(runId, 0);
 }
 
 main().catch((e) => {

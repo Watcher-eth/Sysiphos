@@ -6,12 +6,11 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
 function sseEncode(event: { type: string; data: any; id?: string | number }) {
-  const lines: string[] = [];
-  if (event.id !== undefined) lines.push(`id: ${event.id}`);
-  lines.push(`event: ${event.type}`);
-  lines.push(`data: ${JSON.stringify(event.data)}`);
-  lines.push("");
-  return lines.join("\n");
+  let out = "";
+  if (event.id !== undefined) out += `id: ${event.id}\n`;
+  out += `event: ${event.type}\n`;
+  out += `data: ${JSON.stringify(event.data)}\n\n`; // <-- must be double newline
+  return out;
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -22,6 +21,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!userId) return res.status(401).send("Unauthorized");
 
   const runId = req.query.runId as string;
+  if (!runId) return res.status(400).send("Missing runId");
 
   const runRow = await db
     .select({ workspaceId: schema.runs.workspaceId })
@@ -37,7 +37,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     .where(
       and(
         eq(schema.workspaceMembers.workspaceId, runRow[0].workspaceId),
-        eq(schema.workspaceMembers.userId, userId as any),
+        eq(schema.workspaceMembers.userId, userId as any)
       )
     )
     .limit(1);
@@ -45,19 +45,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!membership[0]) return res.status(403).send("Forbidden");
 
   const after = Number((req.query.after as string) ?? "0");
-  let last = after;
+  let last = Number.isFinite(after) ? after : 0;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
   });
+  (res as any).flushHeaders?.();
 
+  // Helps some proxies; harmless locally
+  res.write(`retry: 1000\n\n`);
   res.write(`: connected\n\n`);
+  res.flushHeaders?.();
 
-  const heartbeat = setInterval(() => res.write(`: ping ${Date.now()}\n\n`), 15_000);
+  const heartbeat = setInterval(() => {
+    res.write(`: ping ${Date.now()}\n\n`);
+  }, 15_000);
 
+  let polling = false;
   const poll = setInterval(async () => {
+    if (polling) return;
+    polling = true;
+
     try {
       const rows = await db
         .select()
@@ -76,14 +87,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           })
         );
       }
-    } catch {
+    } catch (e: any) {
       res.write(sseEncode({ type: "ERROR", data: { message: "SSE poll failed" } }));
+    } finally {
+      polling = false;
     }
   }, 800);
 
-  req.on("close", () => {
+  const cleanup = () => {
     clearInterval(poll);
     clearInterval(heartbeat);
-    res.end();
-  });
+    try {
+      res.end();
+    } catch {}
+  };
+
+  req.on("close", cleanup);
+  res.on("close", cleanup);
 }

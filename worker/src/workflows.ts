@@ -1,3 +1,4 @@
+// worker/src/workflows.ts
 import * as wf from "@temporalio/workflow";
 import type * as acts from "./activities";
 
@@ -18,7 +19,7 @@ export async function ProseRunWorkflow({ runId }: ProseRunArgs) {
   await createTodo({ runId, order: 2, text: "Write deliverables + finalize" });
 
   await writeEvent({ runId, type: "STEP_STARTED", payload: { step: "runner_session" } });
-  await SpawnSessionAndWait({ runId });
+  await SpawnSessionAndWait({ runId }); // activity does fetch/env
   await writeEvent({ runId, type: "STEP_COMPLETED", payload: { step: "runner_session" } });
 
   await setRunStatus({ runId, status: "succeeded" });

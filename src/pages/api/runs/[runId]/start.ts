@@ -7,7 +7,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 
 import { Connection, Client, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
-import { PROSE_RUN_WORKFLOW_NAME, PROSE_TASK_QUEUE, proseWorkflowId } from "@/worker/names";
+import { PROSE_RUN_WORKFLOW_NAME, PROSE_TASK_QUEUE, proseWorkflowId } from "@/lib/temporal/names";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
@@ -90,7 +90,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   console.log("TEMPORAL_ADDRESS =", process.env.TEMPORAL_ADDRESS);
   console.log("TEMPORAL_NAMESPACE =", process.env.TEMPORAL_NAMESPACE);
   console.log("TEMPORAL_TASK_QUEUE =", process.env.TEMPORAL_TASK_QUEUE);
-  
+
   const conn = await Connection.connect({ address: process.env.TEMPORAL_ADDRESS! });
   const client = new Client({
     connection: conn,
