@@ -12,6 +12,7 @@
     "worker:dev": "bun --env-file .env --watch worker/src/index.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.33",
     "@auth/drizzle-adapter": "^1.11.1",
     "@aws-sdk/client-s3": "^3.984.0",
     "@types/bun": "^1.3.8",

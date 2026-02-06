@@ -3,13 +3,15 @@ import { env } from "./env";
 import { assertRunnerAuth, HttpError } from "./auth";
 import { parseProse } from "./prose/parse";
 import { executeProse } from "./prose/runtime";
-import { makeMockAdapter } from "./prose/sessionAdapter";
+import { makeAdapterFromEnv } from "./prose/sessionAdapter";
 
 type SpawnSessionBody = {
   runId: string;
   programHash: string;
 
   agentType?: string;
+
+  // Phase 2+: can override manifest pieces, but if you do, you MUST also provide programText.
   toolAllowlist?: string[];
   files?: Array<{
     contentRef: string;
@@ -19,6 +21,7 @@ type SpawnSessionBody = {
     mime?: string;
     size?: number;
   }>;
+  programText?: string;
 };
 
 function json(body: any, status = 200) {
@@ -43,7 +46,7 @@ type MaterializeResponse = {
   manifest?: {
     runId: string;
     programHash: string;
-    programText?: string;
+    programText: string; // ✅ required now
     toolAllowlist: string[];
     capabilities: string[];
     files: Array<{
@@ -54,8 +57,10 @@ type MaterializeResponse = {
       mime?: string | null;
       size?: number | null;
     }>;
-    env?: Record<string, string>;
-    limits?: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+    env: Record<string, string>;
+    limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+    manifestHash?: string;
+    manifestSig?: string;
   };
   error?: string;
 };
@@ -83,6 +88,9 @@ async function fetchMaterializeManifest(
 
   const parsed = JSON.parse(text) as MaterializeResponse;
   if (!parsed.ok || !parsed.manifest) throw new HttpError(500, parsed.error ?? "materialize_invalid");
+
+  if (!parsed.manifest.programText) throw new HttpError(500, "materialize_missing_programText");
+
   return parsed.manifest;
 }
 
@@ -100,40 +108,50 @@ Bun.serve({
         assertRunnerAuth(req.headers);
 
         const body = await readJson<SpawnSessionBody>(req);
-        const runId = body.runId;
-        const programHash = body.programHash;
+        const { runId, programHash } = body;
 
         if (!runId) throw new HttpError(400, "Missing runId");
         if (!programHash) throw new HttpError(400, "Missing programHash");
 
-        const fetched = !(body.toolAllowlist || body.files)
-          ? await fetchMaterializeManifest(runId, programHash).catch(() => undefined)
-          : undefined;
+        // If caller overrides allowlist/files, require they also pass programText (otherwise you can't execute).
+        const hasOverrides = Boolean(body.toolAllowlist || body.files || body.programText);
 
-        const programText = fetched?.programText ?? "";
-        if (!programText) throw new HttpError(400, "Missing programText (materialize must return it)");
+        const fetched = hasOverrides
+          ? undefined
+          : await fetchMaterializeManifest(runId, programHash).catch(() => undefined);
+
+        const programText = body.programText ?? fetched?.programText ?? "";
+        if (!programText) throw new HttpError(400, "Missing programText");
 
         const manifest = {
           runId,
           programHash,
-          program: { inlineText: programText },
-          tools: body.toolAllowlist ?? fetched?.toolAllowlist ?? [],
+          programText, // ✅ canonical field
+
+          toolAllowlist: body.toolAllowlist ?? fetched?.toolAllowlist ?? [],
           capabilities: fetched?.capabilities ?? [],
           files: (body.files ?? fetched?.files ?? []).map((f) => ({
             contentRef: f.contentRef,
             path: f.path,
             mode: (f.mode ?? "ro") as "ro" | "rw",
             sha256: f.sha256 ?? null,
+            mime: f.mime ?? null,
+            size: f.size ?? null,
           })),
           env: fetched?.env ?? {},
-          limits: fetched?.limits ?? { wallClockMs: 60_000, maxFileBytes: 25_000_000, maxArtifactBytes: 5_000_000 },
+          limits:
+            fetched?.limits ?? {
+              wallClockMs: 60_000,
+              maxFileBytes: 25_000_000,
+              maxArtifactBytes: 5_000_000,
+            },
         };
 
         const sessionId = `sess_${crypto.randomUUID()}`;
 
-        const adapter = makeMockAdapter(); // swap later for real Claude/OpenAI adapter
-        const program = parseProse(manifest.program.inlineText);
-        const exec = await executeProse({ manifest, program, adapter });
+        const adapter = await makeAdapterFromEnv();
+        const program = parseProse(manifest.programText);
+        const exec = await executeProse({ manifest: manifest as any, program, adapter });
 
         return json({
           ok: true,

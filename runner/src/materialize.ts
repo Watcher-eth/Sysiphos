@@ -8,8 +8,12 @@ import { createHash, createHmac } from "node:crypto";
 type Manifest = {
   runId: string;
   programHash: string;
-  program: { inlineText: string };
-  tools: string[];
+
+  // ✅ 4B.4: control plane returns programText (string), not {inlineText}
+  programText: string;
+
+  // ✅ keep naming aligned with control plane response
+  toolAllowlist: string[];
   capabilities: string[];
   files: Array<{
     contentRef: string;
@@ -21,6 +25,8 @@ type Manifest = {
   }>;
   env: Record<string, string>;
   limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+
+  // integrity
   manifestHash: string;
   manifestSig: string;
 };
@@ -44,8 +50,8 @@ function canonicalBase(m: Manifest) {
   return {
     runId: m.runId,
     programHash: m.programHash,
-    program: m.program,
-    tools: m.tools,
+    programText: m.programText,
+    toolAllowlist: m.toolAllowlist,
     capabilities: m.capabilities,
     files: m.files,
     env: m.env,
@@ -65,9 +71,17 @@ async function fetchManifest(runId: string, programHash: string): Promise<Manife
 
   const text = await res.text();
   if (!res.ok) throw new Error(`materialize ${res.status}: ${text}`);
+
   const json = JSON.parse(text);
-  if (!json?.manifest) throw new Error("materialize_invalid_response");
-  return json.manifest as Manifest;
+  if (!json?.ok || !json?.manifest) throw new Error("materialize_invalid_response");
+
+  const m = json.manifest as Manifest;
+
+  if (!m.programText) throw new Error("materialize_missing_programText");
+  if (!m.manifestHash) throw new Error("materialize_missing_manifestHash");
+  if (!m.manifestSig) throw new Error("materialize_missing_manifestSig");
+
+  return m;
 }
 
 export async function materializeWorkspace(params: {
@@ -82,23 +96,23 @@ export async function materializeWorkspace(params: {
   if (manifest.runId !== runId) throw new Error("manifest_run_id_mismatch");
   if (manifest.programHash !== programHash) throw new Error("manifest_program_hash_mismatch");
 
-   // 1) verify manifestHash
-   const canon = stableJson(canonicalBase(manifest));
-   const computedHash = sha256Hex(canon);
-   if (computedHash !== manifest.manifestHash) {
-     throw new Error(`manifest_hash_invalid expected=${manifest.manifestHash} got=${computedHash}`);
-   }
- 
-   // 2) verify manifestSig (HMAC over manifestHash)
-   const computedSig = hmacHex(RUNNER_SHARED_SECRET, manifest.manifestHash);
-   if (computedSig !== manifest.manifestSig) {
-     throw new Error(`manifest_sig_invalid expected=${manifest.manifestSig} got=${computedSig}`);
-   }
+  // 1) verify manifestHash
+  const canon = stableJson(canonicalBase(manifest));
+  const computedHash = sha256Hex(canon);
+  if (computedHash !== manifest.manifestHash) {
+    throw new Error(`manifest_hash_invalid expected=${manifest.manifestHash} got=${computedHash}`);
+  }
+
+  // 2) verify manifestSig (HMAC over manifestHash)
+  const computedSig = hmacHex(RUNNER_SHARED_SECRET, manifest.manifestHash);
+  if (computedSig !== manifest.manifestSig) {
+    throw new Error(`manifest_sig_invalid expected=${manifest.manifestSig} got=${computedSig}`);
+  }
 
   // 3) write program
   const programPath = join(workspaceDir, "program.prose");
   await mkdir(dirname(programPath), { recursive: true });
-  await writeFile(programPath, manifest.program.inlineText, "utf8");
+  await writeFile(programPath, manifest.programText, "utf8");
 
   // 4) materialize files
   for (const f of manifest.files) {

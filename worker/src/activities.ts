@@ -1,5 +1,4 @@
-// worker/src/activities.ts (or wherever this file lives)
-
+// worker/src/activities.ts
 import { eq, max } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
 import { spawnRunnerSession } from "./runnerClient";
@@ -167,7 +166,7 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
     await writeBinding({
       runId: args.runId,
       name: o.bindingName,
-      kind: o.kind,
+      kind: o.kind as any,
       contentRef: o.contentRef,
       contentPreview: o.preview,
       summary: o.summary,
@@ -187,8 +186,9 @@ export async function settleRunBilling(args: {
 }) {
   const workspaceId = await getRunWorkspaceId(args.runId);
 
-  // Policy: always charge at least 1 unless usage provides cost
-  // (If you want canceled to cost 0, change to: args.status === "canceled" ? 0 : ...
+  // Policy: always charge at least 1 unless usage provides cost.
+  // If you want canceled to be free:
+  // const usageCost = args.status === "canceled" ? 0 : Number(args.usage?.costCredits ?? 1);
   const usageCost = Number(args.usage?.costCredits ?? 1);
   const actualCost = Math.max(0, usageCost);
 
@@ -199,8 +199,8 @@ export async function settleRunBilling(args: {
     reason: `settle_${args.status}`,
   });
 
-  // Optional but recommended: emit an event so UI can show billing reconciliation
-  // (Add BILLING_SETTLED to RunEventType if you keep this.)
+  // Optional: emit an event so UI can show billing reconciliation.
+  // (Add BILLING_SETTLED to schema.RunEventType for real typing.)
   try {
     await writeEvent({
       runId: args.runId,

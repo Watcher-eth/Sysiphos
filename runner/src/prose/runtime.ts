@@ -1,15 +1,15 @@
+// runner/src/prose/runtime.ts
 import type { ProseProgram, Stmt, Expr } from "./ast";
 import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
-import type { SessionAdapter } from "./sessionAdapter";
+import type { SessionAdapter, SessionTurnResult } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../s3";
-import { env } from "../env";
 
 type Manifest = {
   runId: string;
   programHash: string;
-  program: { inlineText: string };
-  tools: string[];
+  programText: string;
+  toolAllowlist: string[];
   capabilities: string[];
   files: Array<{ contentRef: string; path: string; mode: "ro" | "rw"; sha256?: string | null }>;
   env: Record<string, string>;
@@ -21,16 +21,12 @@ type ExecResult = {
   usage: { wallClockMs: number; tokensIn?: number; tokensOut?: number; costCredits?: number };
 };
 
-function prefix() {
-  return env.s3Prefix ?? process.env.S3_PREFIX ?? "runs";
-}
-
 function s3BindingKey(runId: string, name: string) {
-  return `${prefix()}/${runId}/bindings/${name}.txt`;
+  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/bindings/${name}.txt`;
 }
 
 function s3AgentMemoryKey(runId: string, agentName: string) {
-  return `${prefix()}/${runId}/agents/${agentName}/memory.md`;
+  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/agents/${agentName}/memory.md`;
 }
 
 function extractResultText(raw: string) {
@@ -39,11 +35,11 @@ function extractResultText(raw: string) {
   return m[1].trim();
 }
 
-function shouldPersistAgent(persist?: string) {
+function isPersistEnabled(persist?: string): boolean {
   if (!persist) return false;
-  const v = String(persist).trim().toLowerCase();
-  if (v === "false" || v === "0" || v === "no" || v === "off") return false;
-  return v === "true" || v === "project" || v === "user" || v === "1" || v === "yes" || v === "on";
+  // In OpenProse syntax, persist can be "true" | "project" | "user" | custom string path.
+  // In runner, anything set means “persist on”.
+  return persist === "true" || persist === "project" || persist === "user" || persist.length > 0;
 }
 
 export async function executeProse(args: {
@@ -54,11 +50,12 @@ export async function executeProse(args: {
   const startedAt = Date.now();
   const { manifest, program, adapter } = args;
 
-  const st: RuntimeState = {
+  const st: RuntimeState & { agentSessionIds: Map<string, string> } = {
     runId: manifest.runId,
     programHash: manifest.programHash,
     bindings: new Map(),
     outputs: [],
+    agentSessionIds: new Map(),
   };
 
   const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
@@ -100,8 +97,11 @@ export async function executeProse(args: {
   async function runSession(args2: { title: string; agentName?: string; isResume: boolean }): Promise<string> {
     const agent = args2.agentName ? program.agents[args2.agentName] : undefined;
 
-    const memoryKey =
-      args2.isResume && args2.agentName ? s3AgentMemoryKey(st.runId, args2.agentName) : null;
+    const persistOn = isPersistEnabled(agent?.persist);
+    const shouldLoadMemory = args2.isResume && args2.agentName && persistOn;
+
+    // Runner “agent memory” (your own file) is separate from Claude “session resume”.
+    const memoryKey = shouldLoadMemory ? s3AgentMemoryKey(st.runId, args2.agentName!) : null;
     const memoryText = memoryKey ? await getTextIfExists(memoryKey) : null;
 
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({
@@ -116,35 +116,52 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-    const session = args2.isResume
+    // Claude session resume (V2):
+    // if we have an existing sessionId for this agent and caller requested resume, use it
+    const priorSessionId =
+      args2.isResume && args2.agentName ? st.agentSessionIds.get(args2.agentName) : undefined;
+
+    const session = priorSessionId
       ? await adapter.resumeSession({
+          sessionId: priorSessionId,
           model: agent?.model,
           system: promptParts.system,
           memoryText,
-          sessionId: "noop",
         })
       : await adapter.createSession({
           model: agent?.model,
           system: promptParts.system,
-          memoryText: null,
+          memoryText: memoryText ?? null,
         });
 
     await session.send(promptParts.user);
 
     let full = "";
+    let latestSessionId: string | undefined;
+
     for await (const msg of session.stream()) {
       full += msg.text ?? "";
+      latestSessionId = msg.sessionId ?? latestSessionId;
+
       usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
       usageAgg.tokensOut += msg.usage?.tokensOut ?? 0;
       usageAgg.costCredits += msg.usage?.costCredits ?? 0;
     }
+
     session.close();
 
-    if (args2.agentName && shouldPersistAgent(agent?.persist)) {
+    // Persist Claude sessionId for this agent if persist is enabled
+    if (args2.agentName && persistOn && latestSessionId) {
+      st.agentSessionIds.set(args2.agentName, latestSessionId);
+    }
+
+    // Memory writeback (run-scoped) for persistent agents only
+    if (args2.agentName && persistOn) {
       const mem =
         `# memory\n\n` +
         `last_task: ${args2.title}\n` +
-        `updated_at: ${new Date().toISOString()}\n`;
+        `updated_at: ${new Date().toISOString()}\n` +
+        (latestSessionId ? `session_id: ${latestSessionId}\n` : "");
       const key = s3AgentMemoryKey(st.runId, args2.agentName);
       await putText(key, mem, "text/markdown");
     }
@@ -157,13 +174,15 @@ export async function executeProse(args: {
       case "comment":
         return;
 
-      case "session":
+      case "session": {
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: false });
         return;
+      }
 
-      case "resume":
+      case "resume": {
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: true });
         return;
+      }
 
       case "let": {
         const v = await evalExpr(stmt.expr);
@@ -206,20 +225,12 @@ export async function executeProse(args: {
       case "parallel": {
         const tasks = stmt.branches.map(async (b) => {
           if (b.name && b.stmt.kind === "session") {
-            const text = await runSession({
-              title: b.stmt.title,
-              agentName: b.stmt.agentName,
-              isResume: false,
-            });
+            const text = await runSession({ title: b.stmt.title, agentName: b.stmt.agentName, isResume: false });
             await writeBinding({ name: b.name, kind: "let", contentRef: "", mime: "text/plain" }, text);
             return;
           }
           if (b.name && b.stmt.kind === "resume") {
-            const text = await runSession({
-              title: b.stmt.title,
-              agentName: b.stmt.agentName,
-              isResume: true,
-            });
+            const text = await runSession({ title: b.stmt.title, agentName: b.stmt.agentName, isResume: true });
             await writeBinding({ name: b.name, kind: "let", contentRef: "", mime: "text/plain" }, text);
             return;
           }
@@ -242,12 +253,15 @@ export async function executeProse(args: {
         return;
       }
 
-      case "repeat":
-        for (let k = 0; k < stmt.n; k++) for (const s of stmt.body) await execStmt(s);
+      case "repeat": {
+        for (let k = 0; k < stmt.n; k++) {
+          for (const s of stmt.body) await execStmt(s);
+        }
         return;
+      }
 
       default:
-        // @ts-expect-error
+        // @ts-expect-error exhaustiveness
         throw new Error(`runtime_unhandled_stmt: ${stmt.kind}`);
     }
   }
