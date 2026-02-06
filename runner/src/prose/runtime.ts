@@ -3,6 +3,7 @@ import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
 import type { SessionAdapter } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../s3";
+import { env } from "../env";
 
 type Manifest = {
   runId: string;
@@ -20,19 +21,29 @@ type ExecResult = {
   usage: { wallClockMs: number; tokensIn?: number; tokensOut?: number; costCredits?: number };
 };
 
+function prefix() {
+  return env.s3Prefix ?? process.env.S3_PREFIX ?? "runs";
+}
+
 function s3BindingKey(runId: string, name: string) {
-  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/bindings/${name}.txt`;
+  return `${prefix()}/${runId}/bindings/${name}.txt`;
 }
 
 function s3AgentMemoryKey(runId: string, agentName: string) {
-  return `${process.env.S3_PREFIX ?? "runs"}/${runId}/agents/${agentName}/memory.md`;
+  return `${prefix()}/${runId}/agents/${agentName}/memory.md`;
 }
 
 function extractResultText(raw: string) {
-  // If model returns <result>...</result>, keep only that section for cleaner bindings.
   const m = raw.match(/<result>([\s\S]*?)<\/result>/);
   if (!m) return raw.trim();
   return m[1].trim();
+}
+
+function shouldPersistAgent(persist?: string) {
+  if (!persist) return false;
+  const v = String(persist).trim().toLowerCase();
+  if (v === "false" || v === "0" || v === "no" || v === "off") return false;
+  return v === "true" || v === "project" || v === "user" || v === "1" || v === "yes" || v === "on";
 }
 
 export async function executeProse(args: {
@@ -93,7 +104,10 @@ export async function executeProse(args: {
       args2.isResume && args2.agentName ? s3AgentMemoryKey(st.runId, args2.agentName) : null;
     const memoryText = memoryKey ? await getTextIfExists(memoryKey) : null;
 
-    const contextRefs = Array.from(st.bindings.values()).map((b) => ({ name: b.name, contentRef: b.contentRef }));
+    const contextRefs = Array.from(st.bindings.values()).map((b) => ({
+      name: b.name,
+      contentRef: b.contentRef,
+    }));
 
     const promptParts = renderSessionPrompt({
       title: args2.title,
@@ -103,8 +117,17 @@ export async function executeProse(args: {
     });
 
     const session = args2.isResume
-      ? await adapter.resumeSession({ model: agent?.model, system: promptParts.system, memoryText, sessionId: "noop" })
-      : await adapter.createSession({ model: agent?.model, system: promptParts.system, memoryText: null });
+      ? await adapter.resumeSession({
+          model: agent?.model,
+          system: promptParts.system,
+          memoryText,
+          sessionId: "noop",
+        })
+      : await adapter.createSession({
+          model: agent?.model,
+          system: promptParts.system,
+          memoryText: null,
+        });
 
     await session.send(promptParts.user);
 
@@ -117,9 +140,11 @@ export async function executeProse(args: {
     }
     session.close();
 
-    // 4B.2 memory writeback (run-scoped) for persistent agents only
-    if (args2.agentName && (agent?.persist === "true" || agent?.persist === true)) {
-      const mem = `# memory\n\nlast_task: ${args2.title}\nupdated_at: ${new Date().toISOString()}\n`;
+    if (args2.agentName && shouldPersistAgent(agent?.persist)) {
+      const mem =
+        `# memory\n\n` +
+        `last_task: ${args2.title}\n` +
+        `updated_at: ${new Date().toISOString()}\n`;
       const key = s3AgentMemoryKey(st.runId, args2.agentName);
       await putText(key, mem, "text/markdown");
     }
@@ -132,33 +157,25 @@ export async function executeProse(args: {
       case "comment":
         return;
 
-      case "session": {
+      case "session":
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: false });
         return;
-      }
 
-      case "resume": {
+      case "resume":
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: true });
         return;
-      }
 
       case "let": {
         const v = await evalExpr(stmt.expr);
         const text = v.text ?? (v.ref ? `ref:${v.ref.contentRef}` : "");
-        await writeBinding(
-          { name: stmt.name, kind: "let", contentRef: "", mime: "text/plain" },
-          text
-        );
+        await writeBinding({ name: stmt.name, kind: "let", contentRef: "", mime: "text/plain" }, text);
         return;
       }
 
       case "output": {
         const v = await evalExpr(stmt.expr);
         const text = v.text ?? (v.ref ? `ref:${v.ref.contentRef}` : "");
-        await writeBinding(
-          { name: stmt.name, kind: "output", contentRef: "", mime: "text/plain" },
-          text
-        );
+        await writeBinding({ name: stmt.name, kind: "output", contentRef: "", mime: "text/plain" }, text);
         return;
       }
 
@@ -167,7 +184,6 @@ export async function executeProse(args: {
           for (const s of stmt.body) await execStmt(s);
         } catch (err: any) {
           if (stmt.catchBody) {
-            // bind catch var as a tiny let binding (by value)
             const msg = String(err?.message ?? err);
             if (stmt.catchName) {
               await writeBinding(
@@ -190,13 +206,20 @@ export async function executeProse(args: {
       case "parallel": {
         const tasks = stmt.branches.map(async (b) => {
           if (b.name && b.stmt.kind === "session") {
-            // capture branch result as let binding automatically
-            const text = await runSession({ title: b.stmt.title, agentName: b.stmt.agentName, isResume: false });
+            const text = await runSession({
+              title: b.stmt.title,
+              agentName: b.stmt.agentName,
+              isResume: false,
+            });
             await writeBinding({ name: b.name, kind: "let", contentRef: "", mime: "text/plain" }, text);
             return;
           }
           if (b.name && b.stmt.kind === "resume") {
-            const text = await runSession({ title: b.stmt.title, agentName: b.stmt.agentName, isResume: true });
+            const text = await runSession({
+              title: b.stmt.title,
+              agentName: b.stmt.agentName,
+              isResume: true,
+            });
             await writeBinding({ name: b.name, kind: "let", contentRef: "", mime: "text/plain" }, text);
             return;
           }
@@ -215,20 +238,15 @@ export async function executeProse(args: {
           return;
         }
 
-        // fail-fast default
         await Promise.all(tasks);
         return;
       }
 
-      case "repeat": {
-        for (let k = 0; k < stmt.n; k++) {
-          for (const s of stmt.body) await execStmt(s);
-        }
+      case "repeat":
+        for (let k = 0; k < stmt.n; k++) for (const s of stmt.body) await execStmt(s);
         return;
-      }
 
       default:
-        // exhaustiveness
         // @ts-expect-error
         throw new Error(`runtime_unhandled_stmt: ${stmt.kind}`);
     }

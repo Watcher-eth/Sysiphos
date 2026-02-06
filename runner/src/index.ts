@@ -1,13 +1,14 @@
 // runner/src/index.ts
 import { env } from "./env";
 import { assertRunnerAuth, HttpError } from "./auth";
-import { putText } from "./s3";
+import { parseProse } from "./prose/parse";
+import { executeProse } from "./prose/runtime";
+import { makeMockAdapter } from "./prose/sessionAdapter";
 
 type SpawnSessionBody = {
   runId: string;
   programHash: string;
 
-  // Phase 2+ (optional for now)
   agentType?: string;
   toolAllowlist?: string[];
   files?: Array<{
@@ -42,6 +43,7 @@ type MaterializeResponse = {
   manifest?: {
     runId: string;
     programHash: string;
+    programText?: string;
     toolAllowlist: string[];
     capabilities: string[];
     files: Array<{
@@ -52,13 +54,17 @@ type MaterializeResponse = {
       mime?: string | null;
       size?: number | null;
     }>;
+    env?: Record<string, string>;
+    limits?: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
   };
   error?: string;
 };
 
-// optional helper (Phase 2): runner pulls manifest if not provided
-async function fetchMaterializeManifest(runId: string, programHash: string): Promise<MaterializeResponse["manifest"]> {
-  const base = env.controlPlaneBaseUrl; // add to env
+async function fetchMaterializeManifest(
+  runId: string,
+  programHash: string
+): Promise<MaterializeResponse["manifest"]> {
+  const base = env.controlPlaneBaseUrl;
   if (!base) return undefined;
 
   const url = new URL("/api/runs/materialize", base);
@@ -74,6 +80,7 @@ async function fetchMaterializeManifest(runId: string, programHash: string): Pro
 
   const text = await res.text();
   if (!res.ok) throw new HttpError(res.status, `materialize failed: ${text}`);
+
   const parsed = JSON.parse(text) as MaterializeResponse;
   if (!parsed.ok || !parsed.manifest) throw new HttpError(500, parsed.error ?? "materialize_invalid");
   return parsed.manifest;
@@ -99,45 +106,50 @@ Bun.serve({
         if (!runId) throw new HttpError(400, "Missing runId");
         if (!programHash) throw new HttpError(400, "Missing programHash");
 
-        // Phase 2: prefer explicit payload, otherwise pull manifest from control plane
-        const manifest =
-          body.toolAllowlist || body.files
-            ? {
-                toolAllowlist: body.toolAllowlist ?? [],
-                files: body.files ?? [],
-              }
-            : await fetchMaterializeManifest(runId, programHash).catch(() => undefined);
+        const fetched = !(body.toolAllowlist || body.files)
+          ? await fetchMaterializeManifest(runId, programHash).catch(() => undefined)
+          : undefined;
+
+        const programText = fetched?.programText ?? "";
+        if (!programText) throw new HttpError(400, "Missing programText (materialize must return it)");
+
+        const manifest = {
+          runId,
+          programHash,
+          program: { inlineText: programText },
+          tools: body.toolAllowlist ?? fetched?.toolAllowlist ?? [],
+          capabilities: fetched?.capabilities ?? [],
+          files: (body.files ?? fetched?.files ?? []).map((f) => ({
+            contentRef: f.contentRef,
+            path: f.path,
+            mode: (f.mode ?? "ro") as "ro" | "rw",
+            sha256: f.sha256 ?? null,
+          })),
+          env: fetched?.env ?? {},
+          limits: fetched?.limits ?? { wallClockMs: 60_000, maxFileBytes: 25_000_000, maxArtifactBytes: 5_000_000 },
+        };
 
         const sessionId = `sess_${crypto.randomUUID()}`;
-        await new Promise((r) => setTimeout(r, 1200));
 
-        const now = new Date().toISOString();
-        const text =
-          `Runner mock output\n` +
-          `runId=${runId}\n` +
-          `programHash=${programHash}\n` +
-          `agentType=${body.agentType ?? "mock"}\n` +
-          `toolAllowlist=${JSON.stringify(manifest?.toolAllowlist ?? [])}\n` +
-          `files=${JSON.stringify((manifest?.files ?? []).map((f: any) => ({ path: f.path, mode: f.mode }))) }\n` +
-          `createdAt=${now}\n`;
-
-        const key = `${env.s3Prefix}/${runId}/bindings/result.txt`;
-        const put = await putText(key, text, "text/plain");
+        const adapter = makeMockAdapter(); // swap later for real Claude/OpenAI adapter
+        const program = parseProse(manifest.program.inlineText);
+        const exec = await executeProse({ manifest, program, adapter });
 
         return json({
           ok: true,
           sessionId,
           status: "succeeded",
-          outputs: {
-            bindingName: "result",
-            kind: "output",
-            contentRef: put.contentRef,
-            mime: put.mime,
-            size: put.size,
-            sha256: put.sha256,
-            preview: text.slice(0, 200),
-            summary: "Mock runner completed successfully.",
-          },
+          outputs: exec.outputs.map((o) => ({
+            bindingName: o.name,
+            kind: o.kind,
+            contentRef: o.contentRef,
+            mime: o.mime,
+            size: o.size,
+            sha256: o.sha256,
+            preview: o.preview,
+            summary: o.summary,
+          })),
+          usage: exec.usage,
         });
       }
 
