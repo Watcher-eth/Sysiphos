@@ -8,22 +8,23 @@ async function sleep(ms: number) {
 }
 
 async function main() {
+  console.log("[worker] TEMPORAL_ADDRESS =", process.env.TEMPORAL_ADDRESS);
+  console.log("[worker] TEMPORAL_NAMESPACE =", process.env.TEMPORAL_NAMESPACE);
+  console.log("[worker] TASK_QUEUE =", TASK_QUEUE);
+
   while (true) {
     try {
-        const connection = await NativeConnection.connect({
-            address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
-          });
-          
-          const worker = await Worker.create({
-            connection,
-            namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
-            taskQueue: TASK_QUEUE,
-            workflowsPath: require.resolve("./workflows"),
-            activities,
-          });
-      console.log("[worker] TEMPORAL_ADDRESS =", process.env.TEMPORAL_ADDRESS);
-console.log("[worker] TEMPORAL_NAMESPACE =", process.env.TEMPORAL_NAMESPACE);
-console.log("[worker] TASK_QUEUE =", TASK_QUEUE);
+      const connection = await NativeConnection.connect({
+        address: process.env.TEMPORAL_ADDRESS ?? "127.0.0.1:7233",
+      });
+
+      const worker = await Worker.create({
+        connection,
+        namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
+        taskQueue: TASK_QUEUE,
+        workflowsPath: require.resolve("./workflows"),
+        activities,
+      });
 
       console.log(`[temporal-worker] RUNNING taskQueue=${TASK_QUEUE}`);
       await worker.run();
@@ -31,7 +32,6 @@ console.log("[worker] TASK_QUEUE =", TASK_QUEUE);
     } catch (err: any) {
       const msg = String(err?.message ?? err);
       console.error("[temporal-worker] connect/run failed:", msg);
-      // retry on connection refused / transient startup issues
       if (msg.includes("Connection refused") || msg.includes("ECONNREFUSED")) {
         await sleep(500);
         continue;

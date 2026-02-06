@@ -1,4 +1,10 @@
-// worker/src/runnerClient.ts
+export type RunnerUsage = {
+  wallClockMs: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  costCredits?: number;
+};
+
 export type RunnerSpawnResponse = {
   ok: boolean;
   sessionId: string;
@@ -13,9 +19,14 @@ export type RunnerSpawnResponse = {
     preview?: string;
     summary?: string;
   };
+  usage?: RunnerUsage;
 };
 
-export async function spawnRunnerSession(args: { runId: string; programHash: string; agentType?: string }) {
+export async function spawnRunnerSession(args: {
+  runId: string;
+  programHash: string;
+  agentType?: string;
+}) {
   const { runId, programHash, agentType = "mock" } = args;
 
   const baseUrl = process.env.RUNNER_URL;

@@ -3,7 +3,7 @@ import { CONTROL_PLANE_URL, RUNNER_SHARED_SECRET } from "./env";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { downloadToFile } from "./s3";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 type Manifest = {
   runId: string;
@@ -22,6 +22,7 @@ type Manifest = {
   env: Record<string, string>;
   limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
   manifestHash: string;
+  manifestSig: string;
 };
 
 function stableJson(value: any): string {
@@ -35,8 +36,12 @@ function sha256Hex(input: string) {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function recomputeManifestHash(m: Manifest): string {
-  const base = {
+function hmacHex(secret: string, message: string) {
+  return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+function canonicalBase(m: Manifest) {
+  return {
     runId: m.runId,
     programHash: m.programHash,
     program: m.program,
@@ -46,15 +51,18 @@ function recomputeManifestHash(m: Manifest): string {
     env: m.env,
     limits: m.limits,
   };
-  return sha256Hex(stableJson(base));
 }
 
 async function fetchManifest(runId: string, programHash: string): Promise<Manifest> {
-  const url = `${CONTROL_PLANE_URL}/api/runs/materialize?runId=${encodeURIComponent(runId)}&programHash=${encodeURIComponent(programHash)}`;
+  const url = `${CONTROL_PLANE_URL}/api/runs/materialize?runId=${encodeURIComponent(
+    runId
+  )}&programHash=${encodeURIComponent(programHash)}`;
+
   const res = await fetch(url, {
     method: "GET",
     headers: { "x-runner-token": RUNNER_SHARED_SECRET },
   });
+
   const text = await res.text();
   if (!res.ok) throw new Error(`materialize ${res.status}: ${text}`);
   const json = JSON.parse(text);
@@ -74,17 +82,25 @@ export async function materializeWorkspace(params: {
   if (manifest.runId !== runId) throw new Error("manifest_run_id_mismatch");
   if (manifest.programHash !== programHash) throw new Error("manifest_program_hash_mismatch");
 
-  const computed = recomputeManifestHash(manifest);
-  if (computed !== manifest.manifestHash) {
-    throw new Error(`manifest_hash_invalid expected=${manifest.manifestHash} got=${computed}`);
-  }
+   // 1) verify manifestHash
+   const canon = stableJson(canonicalBase(manifest));
+   const computedHash = sha256Hex(canon);
+   if (computedHash !== manifest.manifestHash) {
+     throw new Error(`manifest_hash_invalid expected=${manifest.manifestHash} got=${computedHash}`);
+   }
+ 
+   // 2) verify manifestSig (HMAC over manifestHash)
+   const computedSig = hmacHex(RUNNER_SHARED_SECRET, manifest.manifestHash);
+   if (computedSig !== manifest.manifestSig) {
+     throw new Error(`manifest_sig_invalid expected=${manifest.manifestSig} got=${computedSig}`);
+   }
 
-  // 1) Write program
+  // 3) write program
   const programPath = join(workspaceDir, "program.prose");
   await mkdir(dirname(programPath), { recursive: true });
   await writeFile(programPath, manifest.program.inlineText, "utf8");
 
-  // 2) Materialize files
+  // 4) materialize files
   for (const f of manifest.files) {
     const target = join(workspaceDir, f.path);
     await mkdir(dirname(target), { recursive: true });

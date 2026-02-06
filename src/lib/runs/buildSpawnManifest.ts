@@ -1,7 +1,7 @@
 // src/lib/runs/buildSpawnManifest.ts
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 export type SpawnManifest = {
   runId: string;
@@ -24,24 +24,29 @@ export type SpawnManifest = {
     maxArtifactBytes: number;
   };
   manifestHash: string;
+  manifestSig: string; // ✅ NEW
 };
 
 function stableJson(value: any): string {
-  // Minimal deterministic stringify:
-  // - sort object keys
-  // - preserve array order as provided (so we must sort arrays beforehand)
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   const keys = Object.keys(value).sort();
   return `{${keys.map((k) => JSON.stringify(k) + ":" + stableJson(value[k])).join(",")}}`;
 }
 
 function sha256Hex(input: string) {
   return createHash("sha256").update(input).digest("hex");
+}
+
+function hmacHex(secret: string, message: string) {
+  return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+function mustSigningSecret() {
+  const s = process.env.RUNNER_SHARED_SECRET; // reuse shared secret for now
+  // (better: CONTROL_PLANE_MANIFEST_SECRET, but keeping it simple)
+  if (!s) throw new Error("RUNNER_SHARED_SECRET missing (needed for manifest signing)");
+  return s;
 }
 
 export async function buildSpawnManifest(params: {
@@ -77,9 +82,7 @@ export async function buildSpawnManifest(params: {
     .map((p) => String(p.scope))
     .sort();
 
-  const capabilities = perms
-    .map((p) => String(p.capability))
-    .sort();
+  const capabilities = perms.map((p) => String(p.capability)).sort();
 
   // 3) files
   const files = await db
@@ -105,16 +108,14 @@ export async function buildSpawnManifest(params: {
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  // 4) env + limits (v1: empty env; static limits)
+  // 4) env + limits
   const env: Record<string, string> = {};
-
   const limits = {
     wallClockMs: 60_000,
     maxFileBytes: 50 * 1024 * 1024,
     maxArtifactBytes: 50 * 1024 * 1024,
   };
 
-  // 5) manifest hash (exclude itself)
   const base = {
     runId,
     programHash,
@@ -126,10 +127,15 @@ export async function buildSpawnManifest(params: {
     limits,
   };
 
-  const manifestHash = sha256Hex(stableJson(base));
+  const canon = stableJson(base);
+  const manifestHash = sha256Hex(canon);
+
+  const secret = mustSigningSecret();
+  const manifestSig = hmacHex(secret, canon);
 
   return {
     ...base,
     manifestHash,
+    manifestSig,
   };
 }

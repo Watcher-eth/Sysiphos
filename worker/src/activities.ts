@@ -1,5 +1,4 @@
-// worker/src/activities.ts
-import { eq, max, and } from "drizzle-orm";
+import { eq, max } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
 import { spawnRunnerSession } from "./runnerClient";
 import { settleRunHold } from "../../src/lib/billing/ledger";
@@ -14,17 +13,22 @@ async function nextSeq(runId: string): Promise<number> {
 }
 
 async function getRunWorkspaceId(runId: string): Promise<string> {
-    const row = await db
-      .select({ workspaceId: schema.runs.workspaceId })
-      .from(schema.runs)
-      .where(eq(schema.runs.id, runId as any))
-      .limit(1);
-    const ws = row[0]?.workspaceId as any;
-    if (!ws) throw new Error("run_missing_workspace");
-    return String(ws);
-  }
+  const row = await db
+    .select({ workspaceId: schema.runs.workspaceId })
+    .from(schema.runs)
+    .where(eq(schema.runs.id, runId as any))
+    .limit(1);
 
-export async function writeEvent(args: { runId: string; type: schema.RunEventType; payload: any }) {
+  const ws = row[0]?.workspaceId as any;
+  if (!ws) throw new Error("run_missing_workspace");
+  return String(ws);
+}
+
+export async function writeEvent(args: {
+  runId: string;
+  type: schema.RunEventType;
+  payload: any;
+}) {
   const seq = await nextSeq(args.runId);
   await db.insert(schema.runEvents).values({
     runId: args.runId as any,
@@ -61,7 +65,12 @@ export async function createTodo(args: { runId: string; text: string; order: num
   return { id };
 }
 
-async function upsertContentBlob(args: { contentRef: string; sha256?: string; size?: number; mime?: string }) {
+async function upsertContentBlob(args: {
+  contentRef: string;
+  sha256?: string;
+  size?: number;
+  mime?: string;
+}) {
   await db
     .insert(schema.contentBlobs)
     .values({
@@ -127,50 +136,51 @@ export async function writeBinding(args: {
   });
 }
 
-// ✅ This is the Temporal activity signature
+// Runner session: spawn + persist session + write binding.
+// (No billing settle here; workflow finally does it.)
 export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
-    const resp = await spawnRunnerSession({
-      runId: args.runId,
-      programHash: args.programHash,
-      agentType: "mock",
-    });
-  
-    await db.insert(schema.agentSessions).values({
-      runId: args.runId as any,
-      runnerSessionId: resp.sessionId,
-      agentType: "mock",
-      status: resp.status === "succeeded" ? "succeeded" : "failed",
-      endedAt: new Date(),
-    } as any);
-  
-    await writeBinding({
-      runId: args.runId,
-      name: resp.outputs.bindingName,
-      kind: resp.outputs.kind,
-      contentRef: resp.outputs.contentRef,
-      contentPreview: resp.outputs.preview,
-      summary: resp.outputs.summary,
-      sha256: resp.outputs.sha256,
-      size: resp.outputs.size,
-      mime: resp.outputs.mime,
-    });
-  
-    // billing settle (v1 fixed cost)
-    const wsRow = await db
-      .select({ workspaceId: schema.runs.workspaceId })
-      .from(schema.runs)
-      .where(eq(schema.runs.id, args.runId as any))
-      .limit(1);
-  
-    const workspaceId = wsRow[0]?.workspaceId as any;
-    if (!workspaceId) throw new Error("run_missing_workspace");
-  
-    await settleRunHold({
-      workspaceId: String(workspaceId),
-      runId: args.runId,
-      actualCost: 1,
-      reason: "fixed_v1_cost",
-    });
-  
-    return resp;
-  }
+  const resp = await spawnRunnerSession({
+    runId: args.runId,
+    programHash: args.programHash,
+    agentType: "mock",
+  });
+
+  await db.insert(schema.agentSessions).values({
+    runId: args.runId as any,
+    runnerSessionId: resp.sessionId,
+    agentType: "mock",
+    status: resp.status === "succeeded" ? "succeeded" : "failed",
+    endedAt: new Date(),
+  } as any);
+
+  await writeBinding({
+    runId: args.runId,
+    name: resp.outputs.bindingName,
+    kind: resp.outputs.kind,
+    contentRef: resp.outputs.contentRef,
+    contentPreview: resp.outputs.preview,
+    summary: resp.outputs.summary,
+    sha256: resp.outputs.sha256,
+    size: resp.outputs.size,
+    mime: resp.outputs.mime,
+  });
+
+  return resp;
+}
+
+export async function settleRunBilling(args: {
+  runId: string;
+  status: "succeeded" | "failed" | "canceled";
+  usage?: { costCredits?: number } | null;
+}) {
+  const workspaceId = await getRunWorkspaceId(args.runId);
+
+  const actualCost = Math.max(0, Number(args.usage?.costCredits ?? 1));
+
+  await settleRunHold({
+    workspaceId,
+    runId: args.runId,
+    actualCost,
+    reason: `settle_${args.status}`,
+  });
+}

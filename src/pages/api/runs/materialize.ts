@@ -1,38 +1,37 @@
 // src/pages/api/runs/materialize.ts
 import type { NextApiRequest, NextApiResponse } from "next";
-import { eq } from "drizzle-orm";
-import { db, schema } from "@/lib/db";
 import { buildSpawnManifest } from "@/lib/runs/buildSpawnManifest";
+import { createHmac } from "node:crypto";
 
-function requireRunner(req: NextApiRequest) {
-  const got = req.headers["x-runner-token"];
-  const want = process.env.RUNNER_SHARED_SECRET;
-  if (!want) throw new Error("RUNNER_SHARED_SECRET missing");
-  return got === want;
+function hmacHex(secret: string, message: string) {
+  return createHmac("sha256", secret).update(message).digest("hex");
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "GET") return res.status(405).end();
-  if (!requireRunner(req)) return res.status(401).send("Unauthorized");
 
-  const runId = req.query.runId as string;
-  const programHash = req.query.programHash as string;
+  const token = req.headers["x-runner-token"];
+  if (!token || token !== process.env.RUNNER_SHARED_SECRET) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  const runId = String(req.query.runId ?? "");
+  const programHash = String(req.query.programHash ?? "");
   if (!runId || !programHash) return res.status(400).send("Missing runId/programHash");
 
-  // Ensure pinned program matches requested hash
-  const pinned = await db
-    .select({ runProgramHash: schema.runs.programHash })
-    .from(schema.runs)
-    .where(eq(schema.runs.id, runId as any))
-    .limit(1);
-
-  if (!pinned[0]?.runProgramHash) return res.status(409).send("Run not compiled");
-  if (pinned[0].runProgramHash !== programHash) return res.status(409).send("Program hash mismatch");
+  const secret = process.env.RUNNER_SHARED_SECRET;
+  if (!secret) return res.status(500).send("RUNNER_SHARED_SECRET missing");
 
   const manifest = await buildSpawnManifest({ runId, programHash });
 
+  // ✅ sign the manifestHash (not the whole JSON)
+  const manifestSig = hmacHex(secret, manifest.manifestHash);
+
   return res.status(200).json({
     ok: true,
-    manifest,
+    manifest: {
+      ...manifest,
+      manifestSig,
+    },
   });
 }
