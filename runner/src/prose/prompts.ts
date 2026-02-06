@@ -1,65 +1,82 @@
+// runner/src/prose/prompts.ts
 export type PromptParts = {
     system?: string;
     user: string;
   };
   
-  type ContextRef = { name: string; contentRef: string };
-  
-  function joinNonEmpty(parts: Array<string | undefined | null>, sep = "\n") {
-    return parts.filter((p): p is string => !!p && p.trim().length > 0).join(sep);
-  }
-  
-  function renderContextRefs(contextRefs?: ContextRef[]) {
-    if (!contextRefs?.length) return "";
-    return (
-      `<context_refs>\n` +
-      contextRefs.map((c) => `- ${c.name}: ${c.contentRef}`).join("\n") +
-      `\n</context_refs>`
-    );
-  }
-  
-  function renderExamples(examples?: string[]) {
-    if (!examples?.length) return "";
-    return (
-      `<examples>\n` +
-      examples.map((e) => `<example>\n${e}\n</example>`).join("\n") +
-      `\n</examples>`
-    );
-  }
-  
-  /**
-   * Prompt template builder:
-   * - Fixed content lives in system (policy + formatting contract)
-   * - Variable content lives in user (task title + context refs + examples)
-   * - Structured with XML tags (Anthropic best practice)
-   */
   export function renderSessionPrompt(args: {
     title: string;
     agentSystem?: string;
-    contextRefs?: Array<ContextRef>;
+    contextRefs?: Array<{ name: string; contentRef: string }>;
     examples?: string[];
   }): PromptParts {
     const { title, agentSystem, contextRefs, examples } = args;
   
-    const baseSystem = joinNonEmpty([
-      agentSystem?.trim(),
-      `Rules:
-  - Follow the user's instructions precisely.
-  - Use context by reference. If you need details, ask for specific binding names.
-  - Prefer concise output.
-  - If producing a final deliverable, wrap it in <result>...</result>.`,
-    ]);
+    const ctx =
+      contextRefs && contextRefs.length
+        ? `\n<context_refs>\n${contextRefs
+            .map((c) => `- ${c.name}: ${c.contentRef}`)
+            .join("\n")}\n</context_refs>\n`
+        : "";
   
-    const user = joinNonEmpty([
-      `<task>\n${title}\n</task>`,
-      renderContextRefs(contextRefs),
-      renderExamples(examples),
-      `<instructions>
-  - The <context_refs> are pointers. Do not paste huge content unless necessary.
-  - If context is missing, request exactly which ref(s) you need.
-  - Provide the deliverable. Wrap the final output in <result>...</result>.
-  </instructions>`,
-    ]);
+    const ex =
+      examples && examples.length
+        ? `\n<examples>\n${examples
+            .map((e) => `<example>\n${e}\n</example>`)
+            .join("\n")}\n</examples>\n`
+        : "";
   
-    return { system: baseSystem || undefined, user };
+    // IMPORTANT: matches the adapter’s fallback parser:
+    //   @event todo {...}
+    //   @event step started {...}
+    //   @event log info ...
+    const protocol =
+      `\n<protocol>\n` +
+      `You MUST emit realtime events using the @event prefix.\n\n` +
+      `Allowed formats (each event MUST be exactly ONE line):\n` +
+      `1) @event todo {"op":"add|update|complete","id":"t1","text":"...","status":"not_started|in_progress|done","order":1,"description":"..."}\n` +
+      `2) @event step started {"name":"Plan|Execute|Verify|tool:XYZ","detail":"..."}\n` +
+      `   @event step completed {"name":"...","detail":"..."}\n` +
+      `   @event step failed {"name":"...","detail":"..."}\n` +
+      `3) @event log info Your message here\n` +
+      `   @event log error Your message here\n` +
+      `4) @event artifact {"type":"file|document|spreadsheet|email|patch|log","title":"...","data":{...}}\n` +
+      `5) @event result_text {"text":"..."}  (optional; you still MUST return <result>...)</n\n` +
+      `Rules:\n` +
+      `- Every @event line must be a single line (no newlines).\n` +
+      `- For JSON payloads: must be valid JSON (double quotes, no trailing commas).\n` +
+      `- Do NOT put @event lines inside <result>.\n` +
+      `- Do NOT wrap @event lines in markdown code blocks.\n\n` +
+      `TODO REQUIREMENT (strict):\n` +
+      `- BEFORE ANY long text, emit AT LEAST 5 todo(add) events outlining your plan.\n` +
+      `- Use stable IDs: t1, t2, t3, t4, t5 (and t6+ if needed).\n` +
+      `- Orders must be 1..N and reflect execution order.\n` +
+      `- As you progress, emit todo(update/complete) events.\n\n` +
+      `Minimum step events:\n` +
+      `- step started Plan\n` +
+      `- step completed Plan\n` +
+      `- step started Execute\n` +
+      `- step completed Execute\n` +
+      `- step started Verify\n` +
+      `- step completed Verify\n\n` +
+      `If you need more context, emit a todo(add) describing exactly what you need.\n` +
+      `</protocol>\n`;
+  
+    const instructions =
+      `\n<instructions>\n` +
+      `- Use context by reference. Only fetch/paste content if required.\n` +
+      `- Be precise and follow the task exactly.\n` +
+      `- Keep non-event narrative minimal outside <result>.\n` +
+      `- Return the final answer inside <result>...</result>.\n` +
+      `- The <result> MUST contain only the final answer (no @event lines).\n` +
+      `</instructions>\n`;
+  
+    const user =
+      `<task>\n${title}\n</task>\n` +
+      ctx +
+      ex +
+      protocol +
+      instructions;
+  
+    return { system: agentSystem, user };
   }

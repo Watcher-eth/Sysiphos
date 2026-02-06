@@ -3,19 +3,24 @@ import type { ProseProgram, Stmt, Expr } from "./ast";
 import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
 import type { SessionAdapter } from "./sessionAdapter";
+import type { AgentEvent } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../s3";
+import { EventBuffer } from "../events/client";
 
 type Manifest = {
   runId: string;
   programHash: string;
   programText: string;
-
   // ✅ who is driving this execution (user/participant/system)
   principalId?: string;
-
   toolAllowlist: string[];
   capabilities: string[];
-  files: Array<{ contentRef: string; path: string; mode: "ro" | "rw"; sha256?: string | null }>;
+  files: Array<{
+    contentRef: string;
+    path: string;
+    mode: "ro" | "rw";
+    sha256?: string | null;
+  }>;
   env: Record<string, string>;
   limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
 };
@@ -76,6 +81,19 @@ export async function executeProse(args: {
     agentSessionIds: new Map(),
   };
 
+  const eventBuf = new EventBuffer(
+    {
+      v: 1,
+      runId: manifest.runId,
+      programHash: manifest.programHash,
+      principalId,
+      agentName: "system", // can be overridden per enqueue
+    },
+    { flushEveryMs: 500, maxBatch: 50, maxQueue: 2000 }
+  );
+
+  eventBuf.start();
+
   const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
 
   async function writeBinding(binding: BindingRef, contentText: string) {
@@ -124,17 +142,15 @@ export async function executeProse(args: {
     const memoryKey = wantsResume ? s3AgentMemoryKey(st.runId, principalId, agentName) : null;
     const memoryText = memoryKey ? await getTextIfExists(memoryKey) : null;
 
-    // Durable sessionId resolution:
-    // 1) in-memory map (same runner process)
-    // 2) parse from persisted memory file (runner restarts)
     const priorSessionId =
-      wantsResume
-        ? st.agentSessionIds.get(agentKey) ?? parseSessionIdFromMemory(memoryText)
-        : undefined;
+      wantsResume ? st.agentSessionIds.get(agentKey) ?? parseSessionIdFromMemory(memoryText) : undefined;
 
-    if (priorSessionId && persistOn) {
-      st.agentSessionIds.set(agentKey, priorSessionId);
-    }
+    if (priorSessionId && persistOn) st.agentSessionIds.set(agentKey, priorSessionId);
+
+    // ---- event helper (per-session) ----
+    const emit = (event: AgentEvent, usage?: any, sessionId?: string) => {
+        eventBuf.enqueue(event, usage, { agentName, sessionId });
+      };
 
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({
       name: b.name,
@@ -156,22 +172,44 @@ export async function executeProse(args: {
             system: promptParts.system,
             memoryText,
             idempotencyKey: `${st.runId}:${agentKey}:resume`,
+            principalId,
+            agentName,
           })
         : await adapter.createSession({
             model: agent?.model,
             system: promptParts.system,
             memoryText: wantsResume ? memoryText ?? null : null,
             idempotencyKey: `${st.runId}:${agentKey}:create`,
+            principalId,
+            agentName,
           });
 
     await session.send(promptParts.user);
 
     let full = "";
     let latestSessionId: string | undefined;
+    let didAnnounceSession = false;
 
     for await (const msg of session.stream()) {
-      full += msg.text ?? "";
       latestSessionId = msg.sessionId ?? latestSessionId;
+
+      if (latestSessionId && !didAnnounceSession) {
+        didAnnounceSession = true;
+        emit(
+          wantsResume
+            ? { type: "session_resumed", sessionId: latestSessionId, agentName, principalId } as any
+            : { type: "session_started", sessionId: latestSessionId, agentName, principalId } as any,
+          undefined,
+          latestSessionId
+        );
+      }
+
+      if (msg.event) {
+        emit(msg.event as any, msg.usage, latestSessionId);
+      }
+
+      // accumulate assistant chunks for <result> extraction
+      if (msg.text) full += msg.text;
 
       usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
       usageAgg.tokensOut += msg.usage?.tokensOut ?? 0;
@@ -180,11 +218,8 @@ export async function executeProse(args: {
 
     session.close();
 
-    if (persistOn && latestSessionId) {
-      st.agentSessionIds.set(agentKey, latestSessionId);
-    }
+    if (persistOn && latestSessionId) st.agentSessionIds.set(agentKey, latestSessionId);
 
-    // run-scoped, principal-scoped memory writeback for persistent agents
     if (persistOn) {
       const sidLine = latestSessionId ? `session_id: ${latestSessionId}\n` : "";
       const mem =
@@ -301,6 +336,9 @@ export async function executeProse(args: {
   for (const stmt of program.statements) {
     await execStmt(stmt);
   }
+
+  // ✅ important: flush events before returning
+  await eventBuf.flushAllAndStop();
 
   const wallClockMs = Date.now() - startedAt;
   return {

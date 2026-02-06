@@ -1,6 +1,8 @@
+// src/pages/api/runs/[runId]/events.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { and, asc, eq, gt } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
+import { runEventsHub } from "@/lib/runs/eventHub";
 
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -9,7 +11,7 @@ function sseEncode(event: { type: string; data: any; id?: string | number }) {
   let out = "";
   if (event.id !== undefined) out += `id: ${event.id}\n`;
   out += `event: ${event.type}\n`;
-  out += `data: ${JSON.stringify(event.data)}\n\n`; // <-- must be double newline
+  out += `data: ${JSON.stringify(event.data)}\n\n`;
   return out;
 }
 
@@ -50,53 +52,73 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
+    Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
   (res as any).flushHeaders?.();
 
-  // Helps some proxies; harmless locally
   res.write(`retry: 1000\n\n`);
   res.write(`: connected\n\n`);
-  res.flushHeaders?.();
 
   const heartbeat = setInterval(() => {
     res.write(`: ping ${Date.now()}\n\n`);
   }, 15_000);
 
-  let polling = false;
-  const poll = setInterval(async () => {
-    if (polling) return;
-    polling = true;
+  // --- DB replay (authoritative) ---
+  try {
+    const rows = await db
+      .select()
+      .from(schema.runEvents)
+      .where(and(eq(schema.runEvents.runId, runId as any), gt(schema.runEvents.seq, last)))
+      .orderBy(asc(schema.runEvents.seq))
+      .limit(1000);
 
-    try {
-      const rows = await db
-        .select()
-        .from(schema.runEvents)
-        .where(and(eq(schema.runEvents.runId, runId as any), gt(schema.runEvents.seq, last)))
-        .orderBy(asc(schema.runEvents.seq))
-        .limit(200);
+    const events = rows.map((r) => ({
+      runId,
+      seq: r.seq,
+      type: r.type,
+      payload: r.payload,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+    }));
 
-      for (const r of rows) {
-        last = Math.max(last, r.seq);
-        res.write(
-          sseEncode({
-            id: r.seq,
-            type: r.type,
-            data: { seq: r.seq, payload: r.payload, createdAt: r.createdAt },
-          })
-        );
-      }
-    } catch (e: any) {
-      res.write(sseEncode({ type: "ERROR", data: { message: "SSE poll failed" } }));
-    } finally {
-      polling = false;
+    if (events.length) {
+      last = Math.max(last, events[events.length - 1].seq);
     }
-  }, 800);
+
+    res.write(
+      sseEncode({
+        type: "replay",
+        id: last,
+        data: {
+          fromSeq: after,
+          toSeq: last,
+          events,
+        },
+      })
+    );
+  } catch (e) {
+    res.write(sseEncode({ type: "ERROR", data: { message: "SSE replay failed" } }));
+  }
+
+  // --- Live stream from hub ---
+  const unsubscribe = runEventsHub.subscribe(runId, (evt: any) => {
+    if (evt.seq <= last) return;
+    last = evt.seq;
+
+    res.write(
+      sseEncode({
+        type: "event",
+        id: evt.seq,
+        data: evt, // {runId,seq,type,payload,createdAt}
+      })
+    );
+  });
 
   const cleanup = () => {
-    clearInterval(poll);
     clearInterval(heartbeat);
+    try {
+      unsubscribe();
+    } catch {}
     try {
       res.end();
     } catch {}

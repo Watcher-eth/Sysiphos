@@ -1,20 +1,6 @@
 // runner/src/prose/sessionAdapter.ts
-import type { PromptParts } from "./prompts";
 
-export type SessionCreateArgs = {
-  model?: string;
-  system?: string;
-  memoryText?: string | null;
-
-  sessionId?: string | null; // resume when known
-  idempotencyKey?: string | null; // ✅ Step 5+ (provider-safe retries)
-};
-
-export type SessionTurnResult = {
-  text: string;
-  sessionId?: string;
-  usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
-};
+import { makeClaudeAdapter } from "./adapters/claudeV2";
 
 export interface SessionHandle {
   send(userText: string): Promise<void>;
@@ -26,6 +12,44 @@ export interface SessionAdapter {
   createSession(args: SessionCreateArgs): Promise<SessionHandle>;
   resumeSession(args: SessionCreateArgs & { sessionId: string }): Promise<SessionHandle>;
 }
+// runner/src/prose/sessionAdapter.ts
+export type AgentEvent =
+  | { type: "session_started"; sessionId?: string; agentName?: string; principalId?: string }
+  | { type: "session_resumed"; sessionId: string; agentName?: string; principalId?: string }
+  | { type: "thinking"; text: string } // optional; can be redacted/disabled
+  | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
+  | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
+  | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string }
+  | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
+  | { type: "result_text"; text: string } // final extracted <result> payload (or equivalent)
+  | { type: "raw"; provider: "claude"; payload: any };
+
+export type SessionTurnResult = {
+  sessionId?: string;
+  usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
+  event?: AgentEvent;
+  // legacy support (optional)
+  text?: string;
+};
+
+export interface SessionHandle {
+  send(userText: string): Promise<void>;
+  stream(): AsyncGenerator<SessionTurnResult>;
+  close(): void;
+}
+
+export type SessionCreateArgs = {
+  model?: string;
+  system?: string;
+  memoryText?: string | null;
+
+  sessionId?: string | null;
+  idempotencyKey?: string | null;
+
+  // ✅ new: help routing/debugging + scoping
+  principalId?: string;
+  agentName?: string;
+};
 
 export function makeMockAdapter(): SessionAdapter {
   return {
@@ -67,5 +91,10 @@ export function makeMockAdapter(): SessionAdapter {
 }
 
 export async function makeAdapterFromEnv(): Promise<SessionAdapter> {
-  return makeMockAdapter();
-}
+    const provider = (process.env.AGENT_PROVIDER ?? "claude").toLowerCase();
+  
+    if (provider === "claude") return makeClaudeAdapter();
+  
+    // fallback for dev
+    return makeClaudeAdapter();
+  }
