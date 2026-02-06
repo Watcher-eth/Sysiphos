@@ -2,6 +2,7 @@
 import { eq, max, and } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
 import { spawnRunnerSession } from "./runnerClient";
+import { settleRunHold } from "../../src/lib/billing/ledger";
 
 async function nextSeq(runId: string): Promise<number> {
   const row = await db
@@ -11,6 +12,17 @@ async function nextSeq(runId: string): Promise<number> {
 
   return (row[0]?.m ?? 0) + 1;
 }
+
+async function getRunWorkspaceId(runId: string): Promise<string> {
+    const row = await db
+      .select({ workspaceId: schema.runs.workspaceId })
+      .from(schema.runs)
+      .where(eq(schema.runs.id, runId as any))
+      .limit(1);
+    const ws = row[0]?.workspaceId as any;
+    if (!ws) throw new Error("run_missing_workspace");
+    return String(ws);
+  }
 
 export async function writeEvent(args: { runId: string; type: schema.RunEventType; payload: any }) {
   const seq = await nextSeq(args.runId);
@@ -117,27 +129,48 @@ export async function writeBinding(args: {
 
 // ✅ This is the Temporal activity signature
 export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
-  const resp = await spawnRunnerSession({ runId: args.runId, programHash: args.programHash, agentType: "mock" });
-
-  await db.insert(schema.agentSessions).values({
-    runId: args.runId as any,
-    runnerSessionId: resp.sessionId,
-    agentType: "mock",
-    status: resp.status === "succeeded" ? "succeeded" : "failed",
-    endedAt: new Date(),
-  } as any);
-
-  await writeBinding({
-    runId: args.runId,
-    name: resp.outputs.bindingName,
-    kind: resp.outputs.kind,
-    contentRef: resp.outputs.contentRef,
-    contentPreview: resp.outputs.preview,
-    summary: resp.outputs.summary,
-    sha256: resp.outputs.sha256,
-    size: resp.outputs.size,
-    mime: resp.outputs.mime,
-  });
-
-  return resp;
-}
+    const resp = await spawnRunnerSession({
+      runId: args.runId,
+      programHash: args.programHash,
+      agentType: "mock",
+    });
+  
+    await db.insert(schema.agentSessions).values({
+      runId: args.runId as any,
+      runnerSessionId: resp.sessionId,
+      agentType: "mock",
+      status: resp.status === "succeeded" ? "succeeded" : "failed",
+      endedAt: new Date(),
+    } as any);
+  
+    await writeBinding({
+      runId: args.runId,
+      name: resp.outputs.bindingName,
+      kind: resp.outputs.kind,
+      contentRef: resp.outputs.contentRef,
+      contentPreview: resp.outputs.preview,
+      summary: resp.outputs.summary,
+      sha256: resp.outputs.sha256,
+      size: resp.outputs.size,
+      mime: resp.outputs.mime,
+    });
+  
+    // billing settle (v1 fixed cost)
+    const wsRow = await db
+      .select({ workspaceId: schema.runs.workspaceId })
+      .from(schema.runs)
+      .where(eq(schema.runs.id, args.runId as any))
+      .limit(1);
+  
+    const workspaceId = wsRow[0]?.workspaceId as any;
+    if (!workspaceId) throw new Error("run_missing_workspace");
+  
+    await settleRunHold({
+      workspaceId: String(workspaceId),
+      runId: args.runId,
+      actualCost: 1,
+      reason: "fixed_v1_cost",
+    });
+  
+    return resp;
+  }

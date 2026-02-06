@@ -19,6 +19,7 @@ import {
 } from "@/lib/temporal/names";
 
 import { compileAndPinRun } from "@/lib/runs/compileRun";
+import { reserveForRun } from "@/lib/billing/ledger";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
@@ -98,6 +99,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (!programRow[0] || programRow[0].programHash !== pinned[0].programHash) {
     return res.status(409).send("Pinned program mismatch. Re-compile.");
+  }
+
+  // billing preflight (v1 fixed hold) — idempotent by runId
+  const estCost = 1;
+
+  const existingHold = await db
+    .select({ id: schema.creditLedger.id })
+    .from(schema.creditLedger)
+    .where(
+      and(
+        eq(schema.creditLedger.workspaceId, run.workspaceId),
+        eq(schema.creditLedger.runId, runId as any),
+        eq(schema.creditLedger.kind, "hold")
+      )
+    )
+    .limit(1);
+
+  if (!existingHold[0]) {
+    const hold = await reserveForRun({
+      workspaceId: run.workspaceId as any,
+      runId,
+      estCost,
+      reason: "start_run_hold",
+    });
+
+    if (!hold.ok) {
+      return res.status(402).json({
+        ok: false,
+        error: "insufficient_credits",
+        balance: hold.balance,
+        required: estCost,
+      });
+    }
   }
 
   // RUN_CREATED only once

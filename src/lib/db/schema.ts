@@ -508,3 +508,26 @@ export const runFiles = pgTable(
     uniq: uniqueIndex("run_files__uniq").on(t.runId, t.path),
   })
 );
+
+export type CreditLedgerKind = "credit" | "debit" | "hold" | "release";
+
+export const creditLedger = pgTable(
+  "credit_ledger",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+
+    kind: text("kind").notNull().$type<CreditLedgerKind>(),
+    amount: integer("amount").notNull(), // credits (int). keep cents later if you want.
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    reason: text("reason").notNull().default(""),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byWorkspace: index("credit_ledger__workspace_idx").on(t.workspaceId, t.createdAt),
+    byRun: index("credit_ledger__run_idx").on(t.runId),
+  })
+);

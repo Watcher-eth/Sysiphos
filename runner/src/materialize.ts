@@ -1,60 +1,101 @@
-import { db } from "@/lib/db";
-import { runs, runPrograms, runFiles, runPermissions } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+// runner/src/materialize.ts
+import { CONTROL_PLANE_URL, RUNNER_SHARED_SECRET } from "./env";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { downloadToFile } from "./s3";
+import { createHash } from "node:crypto";
 
-export type SpawnManifest = {
+type Manifest = {
   runId: string;
-  program: { programHash: string; compilerVersion: string; programText: string };
-  files: Array<{ contentRef: string; path: string; mode: "ro" | "rw"; sha256?: string | null; mime?: string | null; size?: number | null }>;
-  toolAllowlist: string[]; // derived from permissions scope
-  capabilities: string[]; // raw capabilities for runner gating
+  programHash: string;
+  program: { inlineText: string };
+  tools: string[];
+  capabilities: string[];
+  files: Array<{
+    contentRef: string;
+    path: string;
+    mode: "ro" | "rw";
+    sha256: string | null;
+    mime: string | null;
+    size: number | null;
+  }>;
+  env: Record<string, string>;
+  limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+  manifestHash: string;
 };
 
-function sortBy<T>(arr: T[], key: (t: T) => string) {
-  return [...arr].sort((a, b) => key(a).localeCompare(key(b)));
+function stableJson(value: any): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => JSON.stringify(k) + ":" + stableJson(value[k])).join(",")}}`;
 }
 
-export async function buildSpawnManifest(runId: string, programHash: string): Promise<SpawnManifest> {
-  const run = await db.query.runs.findFirst({ where: eq(runs.id, runId) });
-  if (!run) throw new Error("run_not_found");
+function sha256Hex(input: string) {
+  return createHash("sha256").update(input).digest("hex");
+}
 
-  const rp = await db.query.runPrograms.findFirst({ where: eq(runPrograms.runId, runId) });
-  if (!rp) throw new Error("run_program_missing");
-  if (rp.programHash !== programHash) throw new Error("run_program_hash_mismatch");
-
-  const files = await db.query.runFiles.findMany({ where: eq(runFiles.runId, runId) });
-  const perms = await db.query.runPermissions.findMany({ where: eq(runPermissions.runId, runId) });
-
-  const capabilities = sortBy(perms.map((p) => p.capability), (x) => x);
-
-  const toolAllowlist = sortBy(
-    perms
-      .filter((p) => p.capability === "tools.use" && p.scope)
-      .map((p) => p.scope!) ,
-    (x) => x
-  );
-
-  const sortedFiles = sortBy(
-    files.map((f) => ({
-      contentRef: f.contentRef,
-      path: f.path,
-      mode: f.mode,
-      sha256: f.sha256 ?? null,
-      mime: f.mime ?? null,
-      size: f.size ?? null,
-    })),
-    (x) => x.path
-  );
-
-  return {
-    runId,
-    program: {
-      programHash: rp.programHash,
-      compilerVersion: rp.compilerVersion,
-      programText: rp.programText,
-    },
-    files: sortedFiles,
-    toolAllowlist,
-    capabilities,
+function recomputeManifestHash(m: Manifest): string {
+  const base = {
+    runId: m.runId,
+    programHash: m.programHash,
+    program: m.program,
+    tools: m.tools,
+    capabilities: m.capabilities,
+    files: m.files,
+    env: m.env,
+    limits: m.limits,
   };
+  return sha256Hex(stableJson(base));
+}
+
+async function fetchManifest(runId: string, programHash: string): Promise<Manifest> {
+  const url = `${CONTROL_PLANE_URL}/api/runs/materialize?runId=${encodeURIComponent(runId)}&programHash=${encodeURIComponent(programHash)}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { "x-runner-token": RUNNER_SHARED_SECRET },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`materialize ${res.status}: ${text}`);
+  const json = JSON.parse(text);
+  if (!json?.manifest) throw new Error("materialize_invalid_response");
+  return json.manifest as Manifest;
+}
+
+export async function materializeWorkspace(params: {
+  runId: string;
+  programHash: string;
+  workspaceDir: string;
+}) {
+  const { runId, programHash, workspaceDir } = params;
+
+  const manifest = await fetchManifest(runId, programHash);
+
+  if (manifest.runId !== runId) throw new Error("manifest_run_id_mismatch");
+  if (manifest.programHash !== programHash) throw new Error("manifest_program_hash_mismatch");
+
+  const computed = recomputeManifestHash(manifest);
+  if (computed !== manifest.manifestHash) {
+    throw new Error(`manifest_hash_invalid expected=${manifest.manifestHash} got=${computed}`);
+  }
+
+  // 1) Write program
+  const programPath = join(workspaceDir, "program.prose");
+  await mkdir(dirname(programPath), { recursive: true });
+  await writeFile(programPath, manifest.program.inlineText, "utf8");
+
+  // 2) Materialize files
+  for (const f of manifest.files) {
+    const target = join(workspaceDir, f.path);
+    await mkdir(dirname(target), { recursive: true });
+
+    await downloadToFile({
+      contentRef: f.contentRef,
+      dstPath: target,
+      expectedSha256: f.sha256 ?? undefined,
+      maxBytes: manifest.limits.maxFileBytes,
+    });
+  }
+
+  return { manifest, programPath };
 }

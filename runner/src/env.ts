@@ -18,6 +18,11 @@ export function mustEnv(name: string): string {
     s3Prefix: process.env.S3_PREFIX ?? "runs",
   };
 
+
+  export const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL ?? "http://localhost:3000";
+export const RUNNER_SHARED_SECRET = process.env.RUNNER_SHARED_SECRET ?? "";
+if (!RUNNER_SHARED_SECRET) throw new Error("RUNNER_SHARED_SECRET missing");
+
   console.log("[runner env]", {
     endpoint: process.env.S3_ENDPOINT,
     bucket: process.env.S3_BUCKET,
