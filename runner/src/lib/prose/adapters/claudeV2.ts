@@ -5,147 +5,415 @@ import type {
   SessionCreateArgs,
   SessionHandle,
   SessionTurnResult,
-  ToolHandler,
-  ClaudeToolDef,
 } from "../sessionAdapter";
 
-/**
- * This adapter implements *real* Anthropic tool calling (tool_use -> tool_result loop)
- * using the Messages API via fetch. It does NOT rely on claude-agent-sdk for tools.
- *
- * You can still keep your claude-agent-sdk adapter around, but this one is the Phase-1
- * "real tools" path.
- */
+import { WorkspaceFiles } from "../../files/fileOps";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
-type AnthropicContentBlock =
-  | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: any };
-
-type AnthropicMessageResponse = {
-  id: string;
-  type: "message";
-  role: "assistant";
-  model: string;
-  content: AnthropicContentBlock[];
-  stop_reason: string | null;
-  usage?: { input_tokens?: number; output_tokens?: number };
-};
-
-type AnthropicErrorResponse = { error?: { type?: string; message?: string } };
-
-function mustAnthropicKey() {
-  const k = process.env.ANTHROPIC_API_KEY;
-  if (!k) throw new Error("ANTHROPIC_API_KEY missing");
-  return k;
+function sha256Hex(buf: Buffer) {
+  return createHash("sha256").update(buf).digest("hex");
 }
+
+async function readFileSafe(absPath: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(absPath);
+  } catch {
+    return null;
+  }
+}
+
+async function statFileSafe(absPath: string): Promise<{ bytes: number; sha: string } | null> {
+  const buf = await readFileSafe(absPath);
+  if (!buf) return null;
+  return { bytes: buf.length, sha: sha256Hex(buf) };
+}
+
+function isMutatingTool(tool: string) {
+  return tool === "Write" || tool === "Edit" || tool === "Mkdir" || tool === "Rm" || tool === "Move" || tool === "Copy";
+}
+
+type FileEvent = Extract<AgentEvent, { type: "file" }>;
+type FileOp = FileEvent["op"];
+
+function toolToFileOp(tool: string): FileOp | null {
+  switch (tool) {
+    case "Write": return "created";
+    case "Edit": return "edited";
+    case "Rm": return "deleted";
+    case "Mkdir": return "mkdir";
+    case "Move": return "moved";
+    case "Copy": return "copied";
+    default: return null;
+  }
+}
+
+function tryGetToolPaths(input: any): { path?: string; toPath?: string } {
+  const ti = input?.tool_input ?? input?.toolInput;
+  if (!ti || typeof ti !== "object") return {};
+
+  const p = ti.path ?? ti.file_path ?? ti.filePath ?? ti.filename ?? ti.file ?? ti.target ?? undefined;
+  const to = ti.toPath ?? ti.to_path ?? ti.dest ?? ti.destination ?? ti.dst ?? ti.output ?? undefined;
+  const from = ti.fromPath ?? ti.from_path ?? ti.src ?? ti.source ?? ti.input ?? undefined;
+
+  if (typeof from === "string" && from) return { path: from, toPath: typeof to === "string" ? to : undefined };
+  if (typeof p === "string" && p) return { path: p, toPath: typeof to === "string" ? to : undefined };
+  return {};
+}
+
+async function loadSdk() {
+  return await import("@anthropic-ai/claude-agent-sdk");
+}
+
+type ClaudeMessage = any;
+
+const RUN_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    result_text: { type: "string" },
+
+    todos: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          op: { type: "string", enum: ["add", "update", "complete"] },
+          id: { type: "string" },
+          text: { type: "string" },
+          status: { type: "string" },
+        },
+        required: ["op", "id"],
+      },
+    },
+
+    artifacts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          name: { type: "string" },
+          contentRef: { type: "string" },
+          mime: { type: "string" },
+          size: { type: "number" },
+          sha256: { type: "string" },
+          action: { type: "string", enum: ["created", "updated", "deleted", "unknown"] },
+          path: { type: "string" },
+        },
+        required: ["name", "contentRef"],
+      },
+    },
+
+    next_actions: {
+      type: "array",
+      items: { type: "string" },
+    },
+
+    errors: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          code: { type: "string" },
+          message: { type: "string" },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  required: ["result_text"],
+} as const;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function asTextBlocks(content: AnthropicContentBlock[]) {
-  return content.filter((b): b is { type: "text"; text: string } => b?.type === "text" && typeof (b as any).text === "string");
-}
+function parseEventLineToAgentEvent(line: string): AgentEvent | null {
+  const s = line.trim();
+  if (!s.startsWith("@event")) return null;
 
-function asToolUses(content: AnthropicContentBlock[]) {
-  return content.filter((b): b is { type: "tool_use"; id: string; name: string; input: any } => b?.type === "tool_use");
-}
+  const rest = s.replace(/^@event\s+/, "");
+  if (!rest) return null;
 
-function defaultTools(): ClaudeToolDef[] {
-  // Minimal Phase-1 list. You can override via SessionCreateArgs.tools.
-  return [
-    {
-      name: "tools.search",
-      description: "Search available tools in the control plane tool catalog.",
-      input_schema: {
-        type: "object",
-        properties: { query: { type: "string" }, limit: { type: "number" } },
-        required: ["query"],
-      },
-    },
-    {
-      name: "tools.request",
-      description: "Request additional tool/capability grants for the current run.",
-      input_schema: {
-        type: "object",
-        properties: {
-          grants: { type: "array" },
-          reason: { type: "string" },
-        },
-        required: ["grants"],
-      },
-    },
-    {
-      name: "files.list",
-      description: "List allowed files for this run.",
-      input_schema: { type: "object", properties: { prefix: { type: "string" } } },
-    },
-    {
-      name: "files.get",
-      description: "Read a text file (must be allowed in the manifest).",
-      input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-    },
-    {
-      name: "files.put",
-      description: "Write a text file (must be rw in the manifest).",
-      input_schema: { type: "object", properties: { path: { type: "string" }, text: { type: "string" } }, required: ["path", "text"] },
-    },
-    {
-      name: "http.fetch",
-      description: "Fetch a URL (requires net.egress + domain allowlist).",
-      input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
-    },
-  ];
-}
+  const parts = rest.split(/\s+/);
+  const type = parts[0];
+  const sub = parts.length > 1 ? parts[1] : undefined;
 
-type Msg = { role: "user" | "assistant"; content: any };
+  const payloadStr = rest.slice(type.length).trim();
+  const payloadAfterSubtype =
+    sub && payloadStr.startsWith(sub) ? payloadStr.slice(sub.length).trim() : payloadStr;
 
-async function anthropicCall(args: {
-  model: string;
-  system?: string;
-  messages: Msg[];
-  tools: ClaudeToolDef[];
-  toolChoice?: "auto" | "any" | { type: "tool"; name: string };
-  maxTokens?: number;
-  idempotencyKey?: string | null;
-}): Promise<AnthropicMessageResponse> {
-  const key = mustAnthropicKey();
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey } : {}),
-    },
-    body: JSON.stringify({
-      model: args.model,
-      max_tokens: args.maxTokens ?? 1024,
-      ...(args.system ? { system: args.system } : {}),
-      messages: args.messages,
-      tools: args.tools,
-      tool_choice: args.toolChoice ?? "auto",
-    }),
-  });
-
-  if (!res.ok) {
-    const t = (await res.text().catch(() => "")) || "";
-    let parsed: AnthropicErrorResponse | null = null;
+  const tryParseJson = (v: string) => {
+    const t = v.trim();
+    if (!t) return undefined;
+    if (!(t.startsWith("{") || t.startsWith("["))) return undefined;
     try {
-      parsed = JSON.parse(t);
-    } catch {}
-    const msg = parsed?.error?.message || t || `anthropic_http_${res.status}`;
-    throw new Error(msg);
+      return JSON.parse(t);
+    } catch {
+      return undefined;
+    }
+  };
+
+  if (type === "todo") {
+    const json = tryParseJson(payloadAfterSubtype);
+    if (json && typeof json === "object") return { type: "todo", ...(json as any) } as any;
+
+    const op = sub ?? "add";
+    const text = payloadAfterSubtype;
+    if (text) return { type: "todo", op, text } as any;
+    return { type: "todo", op } as any;
   }
 
-  return (await res.json()) as AnthropicMessageResponse;
+  if (type === "step") {
+    const status = sub ?? "started";
+    const json = tryParseJson(payloadAfterSubtype);
+    if (json && typeof json === "object") return { type: "step", status, ...(json as any) } as any;
+    const detail = payloadAfterSubtype;
+    return { type: "step", status, detail } as any;
+  }
+
+  if (type === "log") {
+    const level = sub ?? "info";
+    const json = tryParseJson(payloadAfterSubtype);
+    if (json && typeof json === "object") return { type: "log", level, ...(json as any) } as any;
+    const msg = payloadAfterSubtype;
+    return { type: "log", level, message: msg || "log" } as any;
+  }
+
+  if (type === "artifact") {
+    const json = tryParseJson(payloadAfterSubtype);
+    if (json && typeof json === "object") return { type: "artifact", ...(json as any) } as any;
+    const text = payloadAfterSubtype;
+    return { type: "artifact", title: text || "artifact" } as any;
+  }
+
+  if (type === "result" || type === "result_text") {
+    const json = tryParseJson(payloadAfterSubtype);
+    if (json && typeof json === "object") return { type: "result_text", ...(json as any) } as any;
+    const text = payloadAfterSubtype;
+    return { type: "result_text", text: text || "" } as any;
+  }
+
+  return { type: "log", level: "info", message: "unknown_event", data: { raw: s } } as any;
 }
 
-function mkSystem(args: SessionCreateArgs) {
-  const sysParts: string[] = [];
-  if (args.system) sysParts.push(args.system);
-  if (args.memoryText) sysParts.push(`\n\n# memory\n${args.memoryText}`);
-  return sysParts.join("\n\n");
+function ingestEventTextChunk(args: { chunk: string; carry: string; emit: (ev: AgentEvent) => void }): string {
+  const { chunk, emit } = args;
+  let buf = (args.carry || "") + (chunk || "");
+  buf = buf.replace(/\r\n/g, "\n");
+
+  const lines = buf.split("\n");
+  const tail = lines.pop() ?? "";
+
+  for (const line of lines) {
+    const ev = parseEventLineToAgentEvent(line);
+    if (ev) emit(ev);
+  }
+
+  return tail;
+}
+
+function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
+  const out: SessionTurnResult[] = [];
+
+  const sid = msg?.session_id ?? msg?.sessionId ?? msg?.data?.session_id ?? msg?.data?.sessionId;
+
+  if (msg?.type === "assistant") {
+    const text =
+      msg?.content?.map?.((c: any) => c?.text).filter(Boolean).join("") ??
+      msg?.text ??
+      "";
+
+    if (text) out.push({ sessionId: sid, text });
+
+    const usage = msg?.usage
+      ? {
+          tokensIn: msg.usage?.input_tokens ?? msg.usage?.inputTokens,
+          tokensOut: msg.usage?.output_tokens ?? msg.usage?.outputTokens,
+          costCredits: undefined,
+        }
+      : undefined;
+
+    if (usage?.tokensIn || usage?.tokensOut) out.push({ sessionId: sid, usage });
+  }
+
+  if (msg?.type === "result") {
+    const text = msg?.output_text ?? msg?.text ?? "";
+    if (text) out.push({ sessionId: sid, text });
+  }
+
+  return out;
+}
+
+type HookCallback = (input: any, toolUseID: string | null, ctx: { signal: AbortSignal }) => Promise<any>;
+
+function mkHooksEmitter(params: {
+  push: (t: SessionTurnResult) => void;
+  files: WorkspaceFiles;
+  toolTouches: Map<string, { tool: string; checkpointId?: string; path?: string; toPath?: string }>;
+  workspaceDir: string;
+}) {
+  const { push, files, toolTouches, workspaceDir } = params;
+
+  const emit = (event: AgentEvent, sessionId?: string, usage?: any) => {
+    push({ sessionId, usage, event });
+  };
+
+  const sessionStart: HookCallback = async (input) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    emit({ type: "session_started", sessionId: sid } as any, sid);
+    return {};
+  };
+
+  const sessionEnd: HookCallback = async (input) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    emit(
+      { type: "log", level: "info", message: "session_end", data: { reason: input?.reason ?? "other", at: nowIso() } } as any,
+      sid
+    );
+    return {};
+  };
+
+  const notification: HookCallback = async (input) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    emit(
+      { type: "log", level: "info", message: input?.message ?? "notification", data: { notification_type: input?.notification_type, title: input?.title } } as any,
+      sid
+    );
+    return {};
+  };
+
+  const preToolUse: HookCallback = async (input, toolUseID) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+    const { path: p, toPath } = tryGetToolPaths(input);
+
+    emit({ type: "step", status: "started", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+    emit({ type: "log", level: "info", message: "tool_access", data: { tool, toolUseID, path: p, toPath } } as any, sid);
+
+    if (toolUseID && isMutatingTool(tool) && p) {
+      const checkpointId = await files.createCheckpoint([p], `tool:${tool}`);
+      toolTouches.set(toolUseID, { tool, checkpointId, path: p, toPath });
+    } else if (toolUseID) {
+      toolTouches.set(toolUseID, { tool, path: p, toPath });
+    }
+
+    return {};
+  };
+
+  const postToolUse: HookCallback = async (input, toolUseID) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+    const { path: p, toPath } = tryGetToolPaths(input);
+
+    emit({ type: "step", status: "completed", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+
+    const touch = toolUseID ? toolTouches.get(toolUseID) : undefined;
+    const fileOp = toolToFileOp(tool);
+
+    if (fileOp && p) {
+      const abs = path.resolve(workspaceDir, p);
+      const after = await statFileSafe(abs);
+
+      const beforeRef =
+        touch?.checkpointId ? await files.getCheckpointContentRef(touch.checkpointId, p) : null;
+
+      const afterPut =
+        toolUseID ? await files.putFileVersion(toolUseID, "after", p) : null;
+
+      emit(
+        {
+          type: "file",
+          op: fileOp as any,
+          path: p,
+          toPath,
+          bytesAfter: after?.bytes ?? null,
+          shaAfter: after?.sha ?? null,
+          contentRefBefore: beforeRef?.contentRef ?? null,
+          contentRefAfter: afterPut?.contentRef ?? null,
+          mime: afterPut?.mime ?? null,
+          data: {
+            tool,
+            toolUseID,
+            checkpointId: touch?.checkpointId ?? null,
+            tool_input: input?.tool_input ?? input?.toolInput,
+          },
+        } as any,
+        sid
+      );
+    }
+
+    return {};
+  };
+
+  const postToolUseFailure: HookCallback = async (input, toolUseID) => {
+    const sid = input?.session_id ?? input?.sessionId;
+    const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+    const { path: p, toPath } = tryGetToolPaths(input);
+
+    emit({ type: "step", status: "failed", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+    emit(
+      {
+        type: "log",
+        level: "error",
+        message: "tool_failed",
+        data: { tool, toolUseID, error: input?.error ?? input?.message ?? input?.reason ?? "unknown" },
+      } as any,
+      sid
+    );
+
+    return {};
+  };
+
+  return {
+    SessionStart: [{ hooks: [sessionStart] }],
+    SessionEnd: [{ hooks: [sessionEnd] }],
+    Notification: [{ hooks: [notification] }],
+    PreToolUse: [{ hooks: [preToolUse] }],
+    PostToolUse: [{ hooks: [postToolUse] }],
+    PostToolUseFailure: [{ hooks: [postToolUseFailure] }],
+  };
+}
+
+function emitStructuredOutput(args: { structured: any; push: (t: SessionTurnResult) => void; sessionId?: string }) {
+  const { structured, push, sessionId } = args;
+  if (!structured || typeof structured !== "object") return;
+
+  const todos = Array.isArray(structured.todos) ? structured.todos : [];
+  for (const t of todos) {
+    if (!t || typeof t !== "object") continue;
+    if (!t.op || !t.id) continue;
+    push({ sessionId, event: { type: "todo", op: t.op, id: t.id, text: t.text, status: t.status } as any });
+  }
+
+  const artifacts = Array.isArray(structured.artifacts) ? structured.artifacts : [];
+  for (const a of artifacts) {
+    if (!a || typeof a !== "object") continue;
+    if (!a.name || !a.contentRef) continue;
+    push({
+      sessionId,
+      event: { type: "artifact", name: a.name, contentRef: a.contentRef, mime: a.mime, size: a.size, sha256: a.sha256, action: a.action, path: a.path } as any,
+    });
+  }
+
+  const next = Array.isArray(structured.next_actions) ? structured.next_actions : [];
+  if (next.length) {
+    push({ sessionId, event: { type: "log", level: "info", message: "next_actions", data: { next_actions: next } } as any });
+  }
+
+  const errs = Array.isArray(structured.errors) ? structured.errors : [];
+  for (const e of errs) {
+    if (!e || typeof e !== "object") continue;
+    push({ sessionId, event: { type: "log", level: "error", message: e.message ?? "error", data: { code: e.code } } as any });
+  }
+
+  if (typeof structured.result_text === "string") {
+    push({ sessionId, event: { type: "result_text", text: structured.result_text } as any });
+  }
 }
 
 class ClaudeSessionHandle implements SessionHandle {
@@ -167,153 +435,151 @@ class ClaudeSessionHandle implements SessionHandle {
     const self = this;
 
     this.iter = (async function* () {
+      const sdk = await loadSdk();
+      const { query } = sdk as any;
+
       const queue: SessionTurnResult[] = [];
       const push = (t: SessionTurnResult) => queue.push(t);
 
-      const toolHandler: ToolHandler | undefined = self.args.toolHandler;
-      const tools = (self.args.tools && self.args.tools.length ? self.args.tools : defaultTools()) as ClaudeToolDef[];
+      let lastSessionId: string | undefined;
 
-      const model = self.model ?? self.args.model ?? "claude-3-5-sonnet-latest";
-      const system = mkSystem(self.args);
+      const runId = self.args.runId ?? "unknown_run";
+      const workspaceDir = self.args.workspaceDir ?? process.cwd();
+
+      const files = new WorkspaceFiles({
+        runId,
+        workspaceDir,
+        principalId: self.args.principalId,
+        agentName: self.args.agentName,
+        emit: (ev) => push({ event: ev, sessionId: lastSessionId }),
+        versioning: true,
+      });
+
+      const toolTouches = new Map<string, { tool: string; checkpointId?: string; path?: string; toPath?: string }>();
+
+      const hooks = mkHooksEmitter({ push, files, toolTouches, workspaceDir });
+
       const prompt = self.userText ?? "";
 
-      let lastSessionId: string | undefined = self.args.resumeSessionId ?? undefined;
+      const toolHandler = self.args.toolHandler;
+      const tools = self.args.tools ?? [];
+
+      const sdkTools = tools.map((t) => ({
+        name: t.name,
+        description: t.description ?? "",
+        input_schema: t.input_schema ?? { type: "object", properties: {}, additionalProperties: true },
+      }));
+
+      const options: any = {
+        model: self.model ?? self.args.model,
+        ...(self.args.resumeSessionId ? { resume: self.args.resumeSessionId } : {}),
+        ...(self.args.system ? { system: self.args.system } : {}),
+        hooks,
+        outputFormat: { type: "json_schema", schema: RUN_OUTPUT_SCHEMA },
+        ...(sdkTools.length ? { tools: sdkTools } : {}),
+        ...(toolHandler
+          ? {
+              toolHandler: async (call: any) => {
+                const name = call?.name ?? call?.tool_name ?? call?.toolName;
+                const input = call?.input ?? call?.tool_input ?? call?.toolInput ?? {};
+                const toolUseId = call?.tool_use_id ?? call?.toolUseId ?? call?.id ?? undefined;
+
+                const r = await toolHandler({ name, input, toolUseId });
+                if ((r as any)?.ok) return (r as any).output;
+
+                const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
+                throw Object.assign(new Error(err.message ?? "tool_failed"), { code: err.code, data: err.data });
+              },
+            }
+          : {}),
+      };
+
+      const resp = query({ prompt, options });
+
+      let carry = "";
       let announced = false;
 
-      const emit = (ev: AgentEvent) => {
+      const emitEvent = (ev: AgentEvent) => {
         push({ sessionId: lastSessionId, event: ev });
       };
 
-      // Build a conversation transcript for the messages API
-      const messages: Msg[] = [];
-      messages.push({ role: "user", content: prompt });
+      for await (const msg of resp as AsyncIterable<any>) {
+        while (queue.length) yield queue.shift()!;
 
-      // Tool loop: keep calling the model until it stops asking for tools
-      for (let turn = 0; turn < 50; turn++) {
-        const resp = await anthropicCall({
-          model,
-          system,
-          messages,
-          tools,
-          toolChoice: "auto",
-          maxTokens: 2048,
-          idempotencyKey: self.args.idempotencyKey ?? null,
-        });
+        if (toolHandler && (msg?.type === "tool_use" || msg?.type === "tool_use_request")) {
+          const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
+          if (sid) lastSessionId = sid;
 
-        lastSessionId = resp.id || lastSessionId;
+          const toolUseId = msg?.tool_use_id ?? msg?.toolUseId ?? msg?.id ?? undefined;
+          const name = msg?.name ?? msg?.tool_name ?? msg?.toolName;
+          const input = msg?.input ?? msg?.tool_input ?? msg?.toolInput ?? {};
 
-        if (!announced && lastSessionId) {
-          announced = true;
-          emit(
-            (self.args.resumeSessionId
-              ? { type: "session_resumed", sessionId: String(lastSessionId) }
-              : { type: "session_started", sessionId: String(lastSessionId) }) as any
-          );
-        }
+          const r = await toolHandler({ name, input, toolUseId });
 
-        // Emit usage
-        if (resp.usage?.input_tokens || resp.usage?.output_tokens) {
-          push({
-            sessionId: lastSessionId,
-            usage: { tokensIn: resp.usage?.input_tokens, tokensOut: resp.usage?.output_tokens },
-          });
-        }
+          if ((r as any)?.ok) {
+            const output = (r as any).output;
 
-        // Emit raw
-        push({ sessionId: lastSessionId, event: { type: "raw", provider: "claude", payload: resp } as any });
-
-        // Emit assistant text (and event-line parsing happens in runtime if you still do that)
-        const text = asTextBlocks(resp.content).map((b) => b.text).join("");
-        if (text) push({ sessionId: lastSessionId, text });
-
-        // Handle tool_use blocks
-        const toolUses = asToolUses(resp.content);
-
-        if (!toolUses.length) {
-          // Done
-          break;
-        }
-
-        if (!toolHandler) {
-          // No handler -> fail fast and provide tool_result error so model can continue / gracefully finish
-          for (const tu of toolUses) {
-            emit({
-              type: "log",
-              level: "error",
-              message: "tool_handler_missing",
-              data: { tool: tu.name, toolUseId: tu.id },
-            } as any);
-
-            messages.push({
-              role: "assistant",
-              content: resp.content,
-            });
-
-            messages.push({
-              role: "user",
-              content: [
-                {
-                  type: "tool_result",
-                  tool_use_id: tu.id,
-                  is_error: true,
-                  content: JSON.stringify({ code: "tool_handler_missing", message: "No toolHandler provided" }),
-                },
-              ],
-            });
+            if (typeof (resp as any)?.sendToolResult === "function") {
+              await (resp as any).sendToolResult({ tool_use_id: toolUseId, output });
+            } else if (typeof (resp as any)?.toolResult === "function") {
+              await (resp as any).toolResult(toolUseId, output);
+            } else {
+              push({ sessionId: lastSessionId, event: { type: "raw", provider: "claude", payload: { tool_result: { toolUseId, output } } } as any });
+            }
+          } else {
+            const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
+            if (typeof (resp as any)?.sendToolResult === "function") {
+              await (resp as any).sendToolResult({ tool_use_id: toolUseId, error: { code: err.code, message: err.message, data: err.data } });
+            }
+            push({ sessionId: lastSessionId, event: { type: "log", level: "error", message: "tool_failed", data: err } as any });
           }
+
           continue;
         }
 
-        // Append assistant content first, then tool_results
-        messages.push({ role: "assistant", content: resp.content });
+        if (msg?.type === "result") {
+          const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
+          if (sid) lastSessionId = sid;
 
-        for (const tu of toolUses) {
-          emit({ type: "step", status: "started", name: `tool:${tu.name}`, detail: `tool_use_id=${tu.id}`, data: { input: tu.input } } as any);
-
-          const result = await toolHandler({ name: tu.name, input: tu.input, toolUseId: tu.id }).catch((e: any) => ({
-            ok: false as const,
-            error: { code: "tool_failed", message: String(e?.message ?? e) },
-          }));
-
-          if (result.ok) {
-            emit({ type: "step", status: "completed", name: `tool:${tu.name}`, detail: `tool_use_id=${tu.id}` } as any);
-            messages.push({
-              role: "user",
-              content: [
-                {
-                  type: "tool_result",
-                  tool_use_id: tu.id,
-                  is_error: false,
-                  content: JSON.stringify(result.output),
-                },
-              ],
+          if (msg?.subtype === "error_max_structured_output_retries") {
+            push({
+              sessionId: lastSessionId,
+              event: { type: "log", level: "error", message: "structured_output_failed", data: { subtype: msg.subtype } } as any,
             });
-          } else {
-            emit({
-              type: "step",
-              status: "failed",
-              name: `tool:${tu.name}`,
-              detail: `tool_use_id=${tu.id}`,
-              data: { error: result.error },
-            } as any);
-            messages.push({
-              role: "user",
-              content: [
-                {
-                  type: "tool_result",
-                  tool_use_id: tu.id,
-                  is_error: true,
-                  content: JSON.stringify(result.error),
-                },
-              ],
-            });
+          } else if (msg?.structured_output) {
+            emitStructuredOutput({ structured: msg.structured_output, push, sessionId: lastSessionId });
           }
         }
 
-        while (queue.length) yield queue.shift()!;
+        const turns = mapClaudeMessageToTurns(msg);
+
+        for (const t of turns) {
+          if (t.sessionId) lastSessionId = t.sessionId;
+
+          if (!announced && lastSessionId) {
+            announced = true;
+            push({
+              sessionId: lastSessionId,
+              event: (self.args.resumeSessionId
+                ? { type: "session_resumed", sessionId: lastSessionId }
+                : { type: "session_started", sessionId: lastSessionId }) as any,
+            });
+          }
+
+          if (t.text) {
+            carry = ingestEventTextChunk({
+              chunk: t.text,
+              carry,
+              emit: (ev) => emitEvent(ev),
+            });
+          }
+
+          yield t;
+        }
       }
 
-      emit({ type: "log", level: "info", message: "session_end", data: { at: nowIso() } } as any);
+      const tailEv = parseEventLineToAgentEvent(carry);
+      if (tailEv) push({ sessionId: lastSessionId, event: tailEv });
 
       while (queue.length) yield queue.shift()!;
     })();

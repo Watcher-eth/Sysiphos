@@ -1,11 +1,18 @@
+// runner/src/prose/tools/registry.ts
 import { z } from "zod";
 import type { ToolCtx, ToolResult } from "./types";
 
 export type ToolDef<I extends z.ZodTypeAny, O extends z.ZodTypeAny> = {
   name: string;
+
+  // ✅ add this
+  description?: string;
+
   input: I;
   output: O;
+
   required: { tool?: string; caps?: string[] };
+
   handler: (ctx: ToolCtx, input: z.infer<I>) => Promise<z.infer<O>>;
 };
 
@@ -24,8 +31,4 @@ export class ToolRegistry {
   listNames() {
     return [...this.byName.keys()].sort();
   }
-}
-
-export function err(code: string, message: string, data?: any): ToolResult {
-  return { ok: false, error: { code, message, data } };
 }

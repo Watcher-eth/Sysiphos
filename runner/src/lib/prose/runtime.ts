@@ -6,10 +6,9 @@ import type { SessionAdapter, AgentEvent } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../../s3";
 import { EventBuffer } from "../events/client";
 
-// ✅ Phase 1 tools
-import { buildRegistry } from "./tools/catalog";
-import { ToolRunner } from "./tools/runner";
-import type { ToolCtx } from "./tools/types";
+import { buildRegistry } from "../tools/catalog";
+import { ToolRunner } from "../tools/runner";
+import type { ToolCtx } from "../tools/types";
 
 type Manifest = {
   runId: string;
@@ -124,12 +123,9 @@ export async function executeProse(args: {
 
   const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
 
-  // ✅ Tool registry + runner (Phase 1)
   const registry = buildRegistry();
 
   const toolRunner = new ToolRunner(registry, (ev: any) => {
-    // Translate any tool-runner events to your canonical AgentEvent step shape
-    // (ToolRunner in earlier plan emits {type:"step", op:"start"/"finish"...}; normalize here.)
     if (ev?.type === "step" && ev?.op === "start") {
       eventBuf.enqueue(
         { type: "step", status: "started", name: String(ev.name ?? ev.toolName ?? "tool"), detail: String(ev.detail ?? "") } as any,
@@ -152,8 +148,6 @@ export async function executeProse(args: {
       );
       return;
     }
-
-    // If it's already in AgentEvent shape, forward.
     eventBuf.enqueue(ev as any, undefined, { agentName: "system" });
   });
 
@@ -216,12 +210,10 @@ export async function executeProse(args: {
       eventBuf.enqueue(event, usage, { agentName, sessionId });
     };
 
-    // ✅ Tool context for this agent/session
     const toolAllowlist = new Set<string>(manifest.toolAllowlist ?? []);
     const capabilities = new Set<string>(manifest.capabilities ?? []);
 
     const allowedDomains = new Set<string>();
-    // Phase 1: allow all only if explicitly toggled
     if (capabilities.has("net.egress") && (manifest.env?.NET_ALLOW_ALL === "1" || process.env.NET_ALLOW_ALL === "1")) {
       allowedDomains.add("*");
     }
@@ -270,6 +262,8 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
+    const tools = toolRunner.getClaudeToolDefs(toolCtx);
+
     const session =
       wantsResume && priorSessionId
         ? await adapter.resumeSession({
@@ -283,6 +277,7 @@ export async function executeProse(args: {
             runId: st.runId,
             workspaceDir,
             toolHandler,
+            tools,
           })
         : await adapter.createSession({
             model: agent?.model,
@@ -294,15 +289,14 @@ export async function executeProse(args: {
             runId: st.runId,
             workspaceDir,
             toolHandler,
+            tools,
           });
 
     await session.send(promptParts.user);
 
     let full = "";
     let latestSessionId: string | undefined;
-
     let didAnnounceSession = false;
-
     let lastResultTextFromEvents: string | undefined;
 
     const todoAddIds = new Set<string>();
@@ -353,7 +347,6 @@ export async function executeProse(args: {
         }
 
         if (msg.event) handleEvent(msg.event, msg.usage);
-
         if (msg.text) full += msg.text;
 
         usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;

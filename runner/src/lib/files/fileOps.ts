@@ -1,3 +1,4 @@
+// runner/src/files/fileOps.ts
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -86,8 +87,6 @@ async function scanDirBytes(absDir: string): Promise<number> {
 }
 
 function bestPrefixMode(allow: Array<{ prefix: string; mode: FileMode }>, relPath: string): FileMode | null {
-  // Longest-prefix match (supports directory allowlists).
-  // Normalize to forward slashes for consistent prefix compares.
   const p = relPath.replaceAll("\\", "/");
   let best: { len: number; mode: FileMode } | null = null;
 
@@ -99,6 +98,16 @@ function bestPrefixMode(allow: Array<{ prefix: string; mode: FileMode }>, relPat
   }
 
   return best ? best.mode : null;
+}
+
+function guessMime(relPath: string): string {
+  const ext = path.extname(relPath).toLowerCase();
+  if (ext === ".json") return "application/json";
+  if (ext === ".md") return "text/markdown";
+  if (ext === ".txt") return "text/plain";
+  if (ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx") return "text/plain";
+  if (ext === ".yaml" || ext === ".yml") return "text/yaml";
+  return "application/octet-stream";
 }
 
 export class WorkspaceFiles {
@@ -117,23 +126,17 @@ export class WorkspaceFiles {
       principalId?: string;
       agentName?: string;
 
-      // ✅ enforcement inputs (from manifest)
       allowlist?: Array<{ path: string; mode: FileMode }>;
       maxFileBytes?: number | null;
-      maxWorkspaceBytes?: number | null; // optional (can reuse maxArtifactBytes if you want)
+      maxWorkspaceBytes?: number | null;
       versioning?: boolean;
-      enforceAllowlist?: boolean; // default true when allowlist provided
+      enforceAllowlist?: boolean;
     }
   ) {
     this.allow = (args.allowlist ?? []).map((x) => ({ prefix: x.path, mode: x.mode }));
     this.maxFileBytes = args.maxFileBytes ?? null;
     this.maxWorkspaceBytes = args.maxWorkspaceBytes ?? null;
     this.versioning = Boolean(args.versioning);
-
-    // If allowlist exists, we enforce by default.
-    if (args.enforceAllowlist === false) {
-      // no-op (keeps allowlist but doesn’t enforce)
-    }
   }
 
   private emit(ev: AgentEventPayload) {
@@ -216,7 +219,6 @@ export class WorkspaceFiles {
     const checkpointId = randomUUID();
     const touched: CheckpointTouched[] = [];
 
-    // prevent restore if dropped later
     const dropped = await getTextIfExists(checkpointDropKey(this.args.runId, checkpointId));
     if (dropped) throw new Error("checkpoint_already_dropped");
 
@@ -288,9 +290,7 @@ export class WorkspaceFiles {
     const manifest = JSON.parse(raw) as CheckpointManifest;
 
     for (const t of manifest.touched) {
-      // restore is a write
       this.assertCanWrite(t.path);
-
       const abs = ensureWithinRoot(this.args.workspaceDir, t.path);
 
       if (!t.existedBefore) {
@@ -305,7 +305,6 @@ export class WorkspaceFiles {
 
       await this.assertFileSizeWithinLimit(beforeBytes.length);
 
-      // quota delta: replace existing file size with restored size (best-effort)
       const current = await readFileSafe(abs);
       const currentBytes = current?.length ?? 0;
       await this.ensureWorkspaceQuota(beforeBytes.length - currentBytes);
@@ -319,12 +318,38 @@ export class WorkspaceFiles {
         path: t.path,
         bytesAfter: beforeBytes.length,
         shaAfter: sha256Hex(beforeBytes),
-        contentRefAfter: t.contentRefBefore, // restored to the checkpoint snapshot
+        contentRefAfter: t.contentRefBefore,
         data: { via: "checkpoint_restore" },
       });
     }
 
     this.emit({ type: "checkpoint", op: "restore", checkpointId });
+  }
+
+  // ✅ Phase 2.3: read checkpoint manifest and return contentRefBefore for a path
+  async getCheckpointContentRef(checkpointId: string, relPath: string): Promise<{ contentRef: string } | null> {
+    const raw = await getTextIfExists(checkpointManifestKey(this.args.runId, checkpointId));
+    if (!raw) return null;
+    const manifest = JSON.parse(raw) as CheckpointManifest;
+    const hit = manifest.touched.find((t) => t.path === relPath);
+    if (!hit?.contentRefBefore) return null;
+    return { contentRef: hit.contentRefBefore };
+  }
+
+  // ✅ Phase 2.3: snapshot current workspace file to version store (for tool hooks)
+  async putFileVersion(opId: string, stage: "before" | "after", relPath: string, mime?: string | null) {
+    this.assertCanRead(relPath);
+
+    const abs = ensureWithinRoot(this.args.workspaceDir, relPath);
+    const buf = await readFileSafe(abs);
+    if (!buf) return null;
+
+    await this.assertFileSizeWithinLimit(buf.length);
+
+    const key = versionKey(this.args.runId, opId, stage, relPath);
+    const put = await putBytes(key, buf, mime ?? guessMime(relPath));
+
+    return { contentRef: put.contentRef, sha256: put.sha256, size: put.size, mime: put.mime };
   }
 
   async writeText(relPath: string, text: string, opts?: { mime?: string | null; checkpointId?: string | null }) {
@@ -427,7 +452,6 @@ export class WorkspaceFiles {
     const shaBefore = before ? sha256Hex(before) : null;
     const bytesBefore = before ? before.length : null;
 
-    // quota delta: subtract file size
     await this.ensureWorkspaceQuota(-(bytesBefore ?? 0));
 
     await fs.rm(abs, { force: true });
@@ -492,7 +516,6 @@ export class WorkspaceFiles {
 
     await this.assertFileSizeWithinLimit(buf.length);
 
-    // quota delta: add new file size (best-effort)
     const existing = await readFileSafe(toAbs);
     const existingBytes = existing?.length ?? 0;
     await this.ensureWorkspaceQuota(buf.length - existingBytes);
