@@ -64,6 +64,20 @@
       "when": 1770422167773,
       "tag": "0008_old_rhodey",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1770423358907,
+      "tag": "0009_sudden_ego",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1770426290625,
+      "tag": "0010_worthless_alex_wilder",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "next_event_seq" integer DEFAULT 1 NOT NULL;

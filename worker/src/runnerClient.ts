@@ -71,7 +71,7 @@ export async function spawnRunnerSession(args: {
       runId,
       programHash,
       agentType,
-      principalId, // ✅ send through
+      principalId,
       idempotencyKey,
     }),
   });

@@ -6,6 +6,68 @@ import type {
     SessionHandle,
     SessionTurnResult,
   } from "../sessionAdapter";
+
+  import { WorkspaceFiles } from "../../files/fileOps";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
+
+function sha256Hex(buf: Buffer) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+async function readFileSafe(absPath: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(absPath);
+  } catch {
+    return null;
+  }
+}
+
+async function statFileSafe(absPath: string): Promise<{ bytes: number; sha: string } | null> {
+  const buf = await readFileSafe(absPath);
+  if (!buf) return null;
+  return { bytes: buf.length, sha: sha256Hex(buf) };
+}
+
+function isMutatingTool(tool: string) {
+  return tool === "Write" || tool === "Edit" || tool === "Mkdir" || tool === "Rm" || tool === "Move" || tool === "Copy";
+}
+
+type FileEvent = Extract<AgentEvent, { type: "file" }>;
+type FileOp = FileEvent["op"];
+
+function toolToFileOp(tool: string): FileOp | null {
+  switch (tool) {
+    case "Write": return "created";
+    case "Edit": return "edited";
+    case "Rm": return "deleted";
+    case "Mkdir": return "mkdir";
+    case "Move": return "moved";
+    case "Copy": return "copied";
+    default: return null;
+  }
+}
+
+// tries to extract both source/target paths for Move/Copy
+function tryGetToolPaths(input: any): { path?: string; toPath?: string } {
+  const ti = input?.tool_input ?? input?.toolInput;
+  if (!ti || typeof ti !== "object") return {};
+
+  const p =
+    ti.path ?? ti.file_path ?? ti.filePath ?? ti.filename ?? ti.file ?? ti.target ?? undefined;
+
+  const to =
+    ti.toPath ?? ti.to_path ?? ti.dest ?? ti.destination ?? ti.dst ?? ti.output ?? undefined;
+
+  const from =
+    ti.fromPath ?? ti.from_path ?? ti.src ?? ti.source ?? ti.input ?? undefined;
+
+  if (typeof from === "string" && from) return { path: from, toPath: typeof to === "string" ? to : undefined };
+  if (typeof p === "string" && p) return { path: p, toPath: typeof to === "string" ? to : undefined };
+  return {};
+}
   
   // NOTE: keep imports dynamic so runner can boot without this dep in dev
   async function loadSdk() {
@@ -238,8 +300,13 @@ import type {
     );
   }
   
-  function mkHooksEmitter(params: { push: (t: SessionTurnResult) => void }) {
-    const { push } = params;
+  function mkHooksEmitter(params: {
+    push: (t: SessionTurnResult) => void;
+    files: WorkspaceFiles;
+    toolTouches: Map<string, { tool: string; checkpointId?: string; path?: string; toPath?: string }>;
+    workspaceDir: string;
+  }) {
+    const { push, files, toolTouches, workspaceDir } = params;
   
     const emit = (event: AgentEvent, sessionId?: string, usage?: any) => {
       push({ sessionId, usage, event });
@@ -283,31 +350,36 @@ import type {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
   
+      const { path: p, toPath } = tryGetToolPaths(input);
+  
       emit(
         {
           type: "step",
           status: "started",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
-          data: {
-            tool,
-            toolUseID,
-            path: tryGetToolPath(input),
-          },
+          data: { tool, toolUseID, path: p, toPath },
         } as any,
         sid
       );
   
-      // Optional: "integration used" breadcrumb
       emit(
         {
           type: "log",
           level: "info",
           message: "tool_access",
-          data: { tool, toolUseID, path: tryGetToolPath(input) },
+          data: { tool, toolUseID, path: p, toPath },
         } as any,
         sid
       );
+  
+      // ✅ 5.6: checkpoint before mutation
+      if (toolUseID && isMutatingTool(tool) && p) {
+        const checkpointId = await files.createCheckpoint([p], `tool:${tool}`);
+        toolTouches.set(toolUseID, { tool, checkpointId, path: p, toPath });
+      } else if (toolUseID) {
+        toolTouches.set(toolUseID, { tool, path: p, toPath });
+      }
   
       return {};
     };
@@ -315,7 +387,7 @@ import type {
     const postToolUse: HookCallback = async (input, toolUseID) => {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
-      const path = tryGetToolPath(input);
+      const { path: p, toPath } = tryGetToolPaths(input);
   
       emit(
         {
@@ -323,28 +395,37 @@ import type {
           status: "completed",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
-          data: { tool, toolUseID, path },
+          data: { tool, toolUseID, path: p, toPath },
         } as any,
         sid
       );
   
-      // Best-effort: surface likely file mutations as explicit artifact events
-      if (tool === "Write" || tool === "Edit" || tool === "Mkdir" || tool === "Rm") {
-        const action =
-          tool === "Write" ? "created" :
-          tool === "Edit" ? "updated" :
-          tool === "Mkdir" ? "created" :
-          tool === "Rm" ? "deleted" :
-          "unknown";
+      // ✅ 5.6: emit real file events (+ checkpoint linkage)
+      const touch = toolUseID ? toolTouches.get(toolUseID) : undefined;
+      const fileOp = toolToFileOp(tool);
   
+      if (fileOp && p) {
+        const abs = path.resolve(workspaceDir, p);
+  
+        // best-effort “after” stats
+        const after = await statFileSafe(abs);
+  
+        // we don't have "before" stats here (checkpoint contains before snapshot);
+        // but we *can* include sha/bytesAfter + checkpointId to join later.
         emit(
           {
-            type: "artifact",
-            name: path ?? `via:${tool}`,
-            contentRef: "",
-            action,
-            path,
-            data: { tool, toolUseID, tool_input: input?.tool_input ?? input?.toolInput },
+            type: "file",
+            op: fileOp as any,
+            path: p,
+            toPath: toPath,
+            bytesAfter: after?.bytes ?? null,
+            shaAfter: after?.sha ?? null,
+            data: {
+              tool,
+              toolUseID,
+              checkpointId: touch?.checkpointId ?? null,
+              tool_input: input?.tool_input ?? input?.toolInput,
+            },
           } as any,
           sid
         );
@@ -356,6 +437,7 @@ import type {
     const postToolUseFailure: HookCallback = async (input, toolUseID) => {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+      const { path: p, toPath } = tryGetToolPaths(input);
   
       emit(
         {
@@ -363,7 +445,7 @@ import type {
           status: "failed",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
-          data: { tool, toolUseID, path: tryGetToolPath(input) },
+          data: { tool, toolUseID, path: p, toPath },
         } as any,
         sid
       );
@@ -395,7 +477,7 @@ import type {
       PostToolUseFailure: [{ hooks: [postToolUseFailure] }],
     };
   }
-  
+
   function emitStructuredOutput(args: {
     structured: any;
     push: (t: SessionTurnResult) => void;
@@ -476,9 +558,32 @@ import type {
   
         const queue: SessionTurnResult[] = [];
         const push = (t: SessionTurnResult) => queue.push(t);
-  
-        const hooks = mkHooksEmitter({ push });
-  
+
+        const runId = self.args.runId ?? "unknown_run";
+        const workspaceDir = self.args.workspaceDir ?? process.cwd();
+
+        const files = new WorkspaceFiles({
+          runId,
+          workspaceDir,
+          principalId: self.args.principalId,
+          agentName: self.args.agentName,
+          emit: (ev) => push({ event: ev, sessionId: lastSessionId }),
+        });
+
+        // toolUseID -> checkpoint + touched paths
+        const toolTouches = new Map<
+          string,
+          { tool: string; checkpointId?: string; path?: string; toPath?: string }
+        >();
+
+        const hooks = mkHooksEmitter({
+          push,
+          // ✅ allow hooks to emit through WorkspaceFiles + include checkpoint ids
+          files,
+          toolTouches,
+          workspaceDir,
+        });
+
         const prompt = self.userText ?? "";
   
         const options: any = {

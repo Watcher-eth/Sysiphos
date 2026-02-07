@@ -94,7 +94,7 @@ function mapAgentEventToRowFields(e: ProducerEnvelope) {
     type = "FILE";
     action = String(ev.op ?? ev.action ?? "edited");
     filePath = ev.path ? String(ev.path) : null;
-    checkpointId = ev.checkpointId ? String(ev.checkpointId) : null;
+    checkpointId = ev.checkpointId ?? ev.data?.checkpointId;
   } else if (agentEventType === "checkpoint") {
     type = "CHECKPOINT";
     action = String(ev.op ?? "created");

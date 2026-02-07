@@ -97,6 +97,11 @@ export async function executeProse(args: {
 
   const principalId = (manifest.principalId?.trim() || "system").slice(0, 128);
 
+  const workspaceDir =
+    (manifest.env?.WORKSPACE_DIR && String(manifest.env.WORKSPACE_DIR)) ||
+    process.env.WORKSPACE_DIR ||
+    process.cwd();
+
   const st: RuntimeState & { agentSessionIds: Map<string, string> } = {
     runId: manifest.runId,
     programHash: manifest.programHash,
@@ -182,7 +187,7 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-    const session =
+       const session =
       wantsResume && priorSessionId
         ? await adapter.resumeSession({
             sessionId: priorSessionId,
@@ -192,6 +197,10 @@ export async function executeProse(args: {
             idempotencyKey: `${st.runId}:${agentKey}:resume`,
             principalId,
             agentName,
+
+            // ✅ 5.6
+            runId: st.runId,
+            workspaceDir,
           })
         : await adapter.createSession({
             model: agent?.model,
@@ -200,6 +209,10 @@ export async function executeProse(args: {
             idempotencyKey: `${st.runId}:${agentKey}:create`,
             principalId,
             agentName,
+
+            // ✅ 5.6
+            runId: st.runId,
+            workspaceDir,
           });
 
     await session.send(promptParts.user);

@@ -192,7 +192,7 @@ export const runs = pgTable(
       sourceType: text("source_type").notNull(),
       taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
       workflowVersionId: uuid("workflow_version_id").references(() => workflowVersions.id, { onDelete: "set null" }),
-  
+      nextEventSeq: integer("next_event_seq").notNull().default(1),
       parentRunId: uuid("parent_run_id"),
       status: text("status").notNull().$type<RunStatus>().default("queued"),
       title: text("title").notNull(),

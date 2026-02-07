@@ -12,26 +12,69 @@ export interface SessionAdapter {
   createSession(args: SessionCreateArgs): Promise<SessionHandle>;
   resumeSession(args: SessionCreateArgs & { sessionId: string }): Promise<SessionHandle>;
 }
-// runner/src/prose/sessionAdapter.ts
-// runner/src/prose/sessionAdapter.ts
 export type AgentEventBase = {
     principalId?: string;
     agentName?: string;
   };
   
-  export type AgentEvent =
-    & AgentEventBase
-    & (
-      | { type: "session_started"; sessionId?: string }
-      | { type: "session_resumed"; sessionId: string }
-      | { type: "thinking"; text: string }
-      | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
-      | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
-      | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string; data?: any }
-      | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
-      | { type: "result_text"; text: string }
-      | { type: "raw"; provider: "claude"; payload: any }
-    );
+  export type TodoEvent = Extract<AgentEvent, { type: "todo" }>;
+  export type TodoOp = TodoEvent["op"];
+  
+  export type CheckpointEvent = Extract<AgentEvent, { type: "checkpoint" }>;
+  export type CheckpointOp = CheckpointEvent["op"];
+  
+  export type FileEvent = Extract<AgentEvent, { type: "file" }>;
+  export type FileOp = FileEvent["op"];
+
+
+export type AgentEvent =
+  & AgentEventBase
+  & (
+    | { type: "session_started"; sessionId?: string }
+    | { type: "session_resumed"; sessionId: string }
+    | { type: "thinking"; text: string }
+    | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
+    | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
+    | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string; data?: any }
+    | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
+    | { type: "result_text"; text: string }
+    | { type: "raw"; provider: "claude"; payload: any }
+    | {
+        type: "checkpoint";
+        op: "create" | "restore" | "drop";
+        checkpointId: string;
+        label?: string;
+        fileCount?: number;
+        bytesTotal?: number;
+        data?: any;
+      }
+    | {
+        type: "file";
+        op:
+          | "opened"
+          | "read"
+          | "created"
+          | "edited"
+          | "deleted"
+          | "moved"
+          | "copied"
+          | "mkdir"
+          | "rmdir";
+        path: string;
+        toPath?: string;
+        bytesBefore?: number | null;
+        bytesAfter?: number | null;
+        shaBefore?: string | null;
+        shaAfter?: string | null;
+        contentRefBefore?: string | null;
+        contentRefAfter?: string | null;
+        mime?: string | null;
+        data?: any;
+      }
+  );
+
+  
+    
 export type SessionTurnResult = {
   sessionId?: string;
   usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
@@ -57,6 +100,10 @@ export type SessionCreateArgs = {
   // ✅ new: help routing/debugging + scoping
   principalId?: string;
   agentName?: string;
+
+  // ✅ 5.6: allow adapters to emit file/checkpoint events correctly (no globals)
+  runId?: string;
+  workspaceDir?: string;
 };
 
 export function makeMockAdapter(): SessionAdapter {

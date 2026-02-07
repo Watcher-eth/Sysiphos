@@ -1,7 +1,7 @@
 // src/pages/api/runs/events.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createHmac } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
 import { runEventsHub } from "@/lib/runs/eventHub";
 
@@ -9,9 +9,7 @@ function stableJson(value: any): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   const keys = Object.keys(value).sort();
-  return `{${keys
-    .map((k) => JSON.stringify(k) + ":" + stableJson(value[k]))
-    .join(",")}}`;
+  return `{${keys.map((k) => JSON.stringify(k) + ":" + stableJson(value[k])).join(",")}}`;
 }
 
 function hmacHex(secret: string, message: string) {
@@ -34,24 +32,40 @@ function mustRunnerSecret() {
   return s;
 }
 
+function normStr(x: any): string | null {
+  const s = typeof x === "string" ? x.trim() : "";
+  return s ? s : null;
+}
+
+function normLower(x: any): string | null {
+  const s = typeof x === "string" ? x.trim().toLowerCase() : "";
+  return s ? s : null;
+}
+
+type ProducerEnvelope = {
+  v: 1;
+  runId: string;
+  programHash: string;
+  principalId: string;
+  agentName?: string;
+  sessionId?: string;
+
+  // producer-local monotonic sequence (idempotency key)
+  sourceSeq: number;
+
+  ts: string;
+  event: any;
+  usage?: any;
+};
+
 type IngestBody = {
   ok: true;
   v: 1;
   runId: string;
   programHash?: string;
   principalId?: string;
-  events: Array<{
-    v: 1;
-    runId: string;
-    programHash: string;
-    principalId: string;
-    agentName?: string;
-    sessionId?: string;
-    seq: number;
-    ts: string;
-    event: any;
-    usage?: any;
-  }>;
+  source?: string; // "runner" | "worker" | "control_plane"
+  events: ProducerEnvelope[];
 };
 
 type Classified = {
@@ -66,113 +80,82 @@ type Classified = {
   checkpointId?: string | null;
 };
 
-function normStr(x: any): string | null {
-  const s = typeof x === "string" ? x.trim() : "";
-  return s ? s : null;
-}
-
-function normLower(x: any): string | null {
-  const s = typeof x === "string" ? x.trim().toLowerCase() : "";
-  return s ? s : null;
-}
-
 function classifyEvent(event: any): Classified {
   const t = String(event?.type ?? "log");
 
-  // --- STEP ---
   if (t === "step") {
     const status = normLower(event?.status) ?? "started";
     const stepId =
       normStr(event?.id) ??
+      normStr(event?.toolUseId) ??
       normStr(event?.stepId) ??
       normStr(event?.key) ??
       normStr(event?.name) ??
       null;
 
     let action: string | null = status;
-    if (status === "complete") action = "completed";
-    if (status === "done") action = "completed";
+    if (status === "complete" || status === "done") action = "completed";
     if (status === "error") action = "failed";
 
-    return {
-      type: "STEP",
-      action: action ?? "started",
-      stepId,
-    };
+    return { type: "STEP", action: action ?? "started", stepId };
   }
 
-  // --- TODO ---
   if (t === "todo") {
     const op = normLower(event?.op) ?? "add";
     const todoId = normStr(event?.id) ?? null;
-    return {
-      type: "TODO",
-      action: op,
-      todoId,
-    };
+    return { type: "TODO", action: op, todoId };
   }
 
-  // --- ARTIFACT ---
   if (t === "artifact") {
     const op = normLower(event?.op) ?? "created";
-    const artifactId = normStr(event?.id) ?? null;
+    const artifactId = normStr(event?.id) ?? normStr(event?.contentRef) ?? null;
     const filePath = normStr(event?.path) ?? null;
-    return {
-      type: "ARTIFACT",
-      action: op,
-      artifactId,
-      filePath: filePath ?? null,
-    };
+    return { type: "ARTIFACT", action: op, artifactId, filePath };
   }
 
-  // --- FILE OPS (explicit) ---
   if (t === "file") {
-    const op = normLower(event?.op) ?? "edited";
-    const path = normStr(event?.path) ?? normStr(event?.filePath) ?? null;
-    return {
-      type: "FILE",
-      action: op,
-      filePath: path,
-    };
+    const op = normLower(event?.op) ?? normLower(event?.action) ?? "edited";
+    const filePath = normStr(event?.path) ?? normStr(event?.filePath) ?? null;
+    const checkpointId = normStr(event?.checkpointId ?? event?.data?.checkpointId) ?? null;
+    return { type: "FILE", action: op, filePath, checkpointId };
   }
 
-  // --- CHECKPOINT ---
   if (t === "checkpoint") {
     const op = normLower(event?.op) ?? "created";
     const checkpointId =
-      normStr(event?.checkpointId) ??
-      normStr(event?.id) ??
-      normStr(event?.providerCheckpointId) ??
-      null;
-    return {
-      type: "CHECKPOINT",
-      action: op,
-      checkpointId,
-    };
+      normStr(event?.id) ?? normStr(event?.providerCheckpointId) ?? null;
+    return { type: "CHECKPOINT", action: op, checkpointId };
   }
 
-  // --- RESULT ---
-  if (t === "result_text") {
-    return { type: "RESULT", action: "final" };
-  }
+  if (t === "result_text" || t === "result") return { type: "RESULT", action: "final" };
 
-  // --- RUN STATUS ---
   if (t === "session_started" || t === "session_resumed") {
     return { type: "RUN_STATUS", action: t === "session_resumed" ? "resumed" : "started" };
   }
 
-  // --- ERROR ---
-  if (t === "error") {
-    return { type: "ERROR", action: "raised", level: "error" };
-  }
+  if (t === "error") return { type: "ERROR", action: "raised", level: "error" };
 
-  // --- LOG (default) ---
   if (t === "log") {
     const level = normLower(event?.level) ?? "info";
     return { type: "LOG", level };
   }
 
   return { type: "LOG", level: "info" };
+}
+
+async function allocateSeqRange(tx: typeof db, runId: string, count: number) {
+  // atomically: take current nextEventSeq, then increment by count
+  const updated = await tx
+    .update(schema.runs)
+    .set({
+      nextEventSeq: sql<number>`${schema.runs.nextEventSeq} + ${count}`,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.runs.id, runId as any))
+    .returning({ start: schema.runs.nextEventSeq });
+
+  const start = Number(updated[0]?.start ?? 1);
+  return { start, endExclusive: start + count };
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -207,76 +190,66 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (!runExists[0]) return res.status(404).send("Run not found");
 
-  // Optional: verify program hash matches pinned program (soft)
-  const pinned = await db
-    .select({ programHash: schema.runs.programHash })
-    .from(schema.runs)
-    .where(eq(schema.runs.id, body.runId as any))
-    .limit(1);
+  const source = (body.source ?? "runner").slice(0, 64);
 
-  const pinnedHash = String(pinned[0]?.programHash ?? "");
-  const bodyHash = String(body.programHash ?? "");
-  if (pinnedHash && bodyHash && pinnedHash !== bodyHash) {
-    // don’t reject (runner can be ahead), but record a warning log row
-    // (you can tighten this later)
-  }
+  const inserted = await db.transaction(async (tx) => {
+    const { start } = await allocateSeqRange(tx as any, body.runId, body.events.length);
 
-  const rowsToInsert = body.events.map((e) => {
-    const event = e?.event ?? { type: "log", level: "warn", message: "missing_event" };
-    const classified = classifyEvent(event);
+    let seq = start;
 
-    const payload = {
-      ...e,
-      runId: body.runId,
-      principalId: body.principalId ?? e.principalId,
-      programHash: body.programHash ?? e.programHash,
-      event,
-    };
+    const rows = body.events.map((e) => {
+      const event = e?.event ?? { type: "log", level: "warn", message: "missing_event" };
+      const classified = classifyEvent(event);
 
-    return {
-      runId: body.runId as any,
-      seq: Number(e.seq),
-      type: classified.type as any,
+      const payload = {
+        ...e,
+        runId: body.runId,
+        principalId: body.principalId ?? e.principalId,
+        programHash: body.programHash ?? e.programHash,
+        event,
+      };
 
-      agentName: normStr(e.agentName) ?? null,
-      sessionId: normStr(e.sessionId) ?? null,
+      return {
+        runId: body.runId as any,
+        seq: seq++,
+        source,
+        sourceSeq: Number(e.sourceSeq ?? 0),
 
-      action: classified.action ?? null,
-      level: classified.level ?? null,
+        type: classified.type as any,
 
-      todoId: classified.todoId ?? null,
-      stepId: classified.stepId ?? null,
-      artifactId: classified.artifactId ?? null,
-      filePath: classified.filePath ?? null,
-      checkpointId: classified.checkpointId ?? null,
+        agentName: normStr(e.agentName) ?? normStr(body.principalId) ?? "system",
+        sessionId: normStr(e.sessionId) ?? null,
 
-      payload,
-      createdAt: new Date(e.ts),
-    };
-  });
+        action: classified.action ?? null,
+        level: classified.level ?? null,
 
-  const inserted = await db
-    .insert(schema.runEvents)
-    .values(rowsToInsert as any)
-    .onConflictDoNothing({
-      target: [schema.runEvents.runId, schema.runEvents.seq],
-    })
-    .returning({
-      runId: schema.runEvents.runId,
-      seq: schema.runEvents.seq,
-      type: schema.runEvents.type,
-      action: schema.runEvents.action,
-      level: schema.runEvents.level,
-      agentName: schema.runEvents.agentName,
-      sessionId: schema.runEvents.sessionId,
-      todoId: schema.runEvents.todoId,
-      stepId: schema.runEvents.stepId,
-      artifactId: schema.runEvents.artifactId,
-      filePath: schema.runEvents.filePath,
-      checkpointId: schema.runEvents.checkpointId,
-      payload: schema.runEvents.payload,
-      createdAt: schema.runEvents.createdAt,
+        todoId: classified.todoId ?? null,
+        stepId: classified.stepId ?? null,
+        artifactId: classified.artifactId ?? null,
+        filePath: classified.filePath ?? null,
+        checkpointId: classified.checkpointId ?? null,
+
+        payload,
+        createdAt: new Date(e.ts),
+      };
     });
+
+    const out = await tx
+      .insert(schema.runEvents)
+      .values(rows as any)
+      .onConflictDoNothing({
+        target: [schema.runEvents.runId, schema.runEvents.source, schema.runEvents.sourceSeq],
+      })
+      .returning({
+        runId: schema.runEvents.runId,
+        seq: schema.runEvents.seq,
+        type: schema.runEvents.type,
+        payload: schema.runEvents.payload,
+        createdAt: schema.runEvents.createdAt,
+      });
+
+    return out;
+  });
 
   if (inserted.length) {
     runEventsHub.publishMany(
@@ -286,8 +259,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         seq: Number(r.seq),
         type: String(r.type),
         payload: r.payload,
-        createdAt:
-          r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
+        createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : String(r.createdAt),
       }))
     );
   }
