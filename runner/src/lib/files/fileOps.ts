@@ -1,4 +1,3 @@
-// runner/src/files/fileOps.ts
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -326,7 +325,7 @@ export class WorkspaceFiles {
     this.emit({ type: "checkpoint", op: "restore", checkpointId });
   }
 
-  // ✅ Phase 2.3: read checkpoint manifest and return contentRefBefore for a path
+  // Phase 2.3: read checkpoint manifest and return contentRefBefore for a path
   async getCheckpointContentRef(checkpointId: string, relPath: string): Promise<{ contentRef: string } | null> {
     const raw = await getTextIfExists(checkpointManifestKey(this.args.runId, checkpointId));
     if (!raw) return null;
@@ -336,7 +335,7 @@ export class WorkspaceFiles {
     return { contentRef: hit.contentRefBefore };
   }
 
-  // ✅ Phase 2.3: snapshot current workspace file to version store (for tool hooks)
+  // Phase 2.3: snapshot current workspace file to version store (for tool hooks)
   async putFileVersion(opId: string, stage: "before" | "after", relPath: string, mime?: string | null) {
     this.assertCanRead(relPath);
 

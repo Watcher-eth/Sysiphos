@@ -1,5 +1,6 @@
 // runner/src/prose/sessionAdapter.ts
 import { makeClaudeAdapter } from "./adapters/claudeV2";
+import type { EventBufferOptions } from "../events/buffer";
 
 export interface SessionHandle {
   send(userText: string): Promise<void>;
@@ -98,13 +99,22 @@ export type SessionCreateArgs = {
   sessionId?: string | null;
   idempotencyKey?: string | null;
 
-  // ✅ new: help routing/debugging + scoping
+  // ✅ routing/debugging + scoping
   principalId?: string;
   agentName?: string;
 
-  // ✅ 5.6: allow adapters to emit file/checkpoint events correctly (no globals)
+  // ✅ run/workspace context for file ops + events
   runId?: string;
   workspaceDir?: string;
+
+  // ✅ Phase 2.4/2.5: control plane streaming
+  programHash?: string;
+  eventBufferOptions?: EventBufferOptions;
+
+  // ✅ workspace safety controls for WorkspaceFiles
+  workspaceAllowlist?: Array<{ path: string; mode: "ro" | "rw" }>;
+  maxFileBytes?: number | null;
+  maxWorkspaceBytes?: number | null;
 
   // ✅ Phase 1: tool calling
   toolHandler?: ToolHandler;

@@ -11,6 +11,7 @@ import { WorkspaceFiles } from "../../files/fileOps";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { EventBuffer } from "../../events/buffer";
 
 function sha256Hex(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
@@ -31,7 +32,14 @@ async function statFileSafe(absPath: string): Promise<{ bytes: number; sha: stri
 }
 
 function isMutatingTool(tool: string) {
-  return tool === "Write" || tool === "Edit" || tool === "Mkdir" || tool === "Rm" || tool === "Move" || tool === "Copy";
+  return (
+    tool === "Write" ||
+    tool === "Edit" ||
+    tool === "Mkdir" ||
+    tool === "Rm" ||
+    tool === "Move" ||
+    tool === "Copy"
+  );
 }
 
 type FileEvent = Extract<AgentEvent, { type: "file" }>;
@@ -39,13 +47,20 @@ type FileOp = FileEvent["op"];
 
 function toolToFileOp(tool: string): FileOp | null {
   switch (tool) {
-    case "Write": return "created";
-    case "Edit": return "edited";
-    case "Rm": return "deleted";
-    case "Mkdir": return "mkdir";
-    case "Move": return "moved";
-    case "Copy": return "copied";
-    default: return null;
+    case "Write":
+      return "created";
+    case "Edit":
+      return "edited";
+    case "Rm":
+      return "deleted";
+    case "Mkdir":
+      return "mkdir";
+    case "Move":
+      return "moved";
+    case "Copy":
+      return "copied";
+    default:
+      return null;
   }
 }
 
@@ -53,9 +68,12 @@ function tryGetToolPaths(input: any): { path?: string; toPath?: string } {
   const ti = input?.tool_input ?? input?.toolInput;
   if (!ti || typeof ti !== "object") return {};
 
-  const p = ti.path ?? ti.file_path ?? ti.filePath ?? ti.filename ?? ti.file ?? ti.target ?? undefined;
-  const to = ti.toPath ?? ti.to_path ?? ti.dest ?? ti.destination ?? ti.dst ?? ti.output ?? undefined;
-  const from = ti.fromPath ?? ti.from_path ?? ti.src ?? ti.source ?? ti.input ?? undefined;
+  const p =
+    ti.path ?? ti.file_path ?? ti.filePath ?? ti.filename ?? ti.file ?? ti.target ?? undefined;
+  const to =
+    ti.toPath ?? ti.to_path ?? ti.dest ?? ti.destination ?? ti.dst ?? ti.output ?? undefined;
+  const from =
+    ti.fromPath ?? ti.from_path ?? ti.src ?? ti.source ?? ti.input ?? undefined;
 
   if (typeof from === "string" && from) return { path: from, toPath: typeof to === "string" ? to : undefined };
   if (typeof p === "string" && p) return { path: p, toPath: typeof to === "string" ? to : undefined };
@@ -272,7 +290,12 @@ function mkHooksEmitter(params: {
   const sessionEnd: HookCallback = async (input) => {
     const sid = input?.session_id ?? input?.sessionId;
     emit(
-      { type: "log", level: "info", message: "session_end", data: { reason: input?.reason ?? "other", at: nowIso() } } as any,
+      {
+        type: "log",
+        level: "info",
+        message: "session_end",
+        data: { reason: input?.reason ?? "other", at: nowIso() },
+      } as any,
       sid
     );
     return {};
@@ -281,7 +304,12 @@ function mkHooksEmitter(params: {
   const notification: HookCallback = async (input) => {
     const sid = input?.session_id ?? input?.sessionId;
     emit(
-      { type: "log", level: "info", message: input?.message ?? "notification", data: { notification_type: input?.notification_type, title: input?.title } } as any,
+      {
+        type: "log",
+        level: "info",
+        message: input?.message ?? "notification",
+        data: { notification_type: input?.notification_type, title: input?.title },
+      } as any,
       sid
     );
     return {};
@@ -292,7 +320,16 @@ function mkHooksEmitter(params: {
     const tool = input?.tool_name ?? input?.toolName ?? "unknown";
     const { path: p, toPath } = tryGetToolPaths(input);
 
-    emit({ type: "step", status: "started", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+    emit(
+      {
+        type: "step",
+        status: "started",
+        name: `tool:${tool}`,
+        detail: `tool_use_id=${toolUseID ?? ""}`,
+        data: { tool, toolUseID, path: p, toPath },
+      } as any,
+      sid
+    );
     emit({ type: "log", level: "info", message: "tool_access", data: { tool, toolUseID, path: p, toPath } } as any, sid);
 
     if (toolUseID && isMutatingTool(tool) && p) {
@@ -310,7 +347,16 @@ function mkHooksEmitter(params: {
     const tool = input?.tool_name ?? input?.toolName ?? "unknown";
     const { path: p, toPath } = tryGetToolPaths(input);
 
-    emit({ type: "step", status: "completed", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+    emit(
+      {
+        type: "step",
+        status: "completed",
+        name: `tool:${tool}`,
+        detail: `tool_use_id=${toolUseID ?? ""}`,
+        data: { tool, toolUseID, path: p, toPath },
+      } as any,
+      sid
+    );
 
     const touch = toolUseID ? toolTouches.get(toolUseID) : undefined;
     const fileOp = toolToFileOp(tool);
@@ -355,7 +401,16 @@ function mkHooksEmitter(params: {
     const tool = input?.tool_name ?? input?.toolName ?? "unknown";
     const { path: p, toPath } = tryGetToolPaths(input);
 
-    emit({ type: "step", status: "failed", name: `tool:${tool}`, detail: `tool_use_id=${toolUseID ?? ""}`, data: { tool, toolUseID, path: p, toPath } } as any, sid);
+    emit(
+      {
+        type: "step",
+        status: "failed",
+        name: `tool:${tool}`,
+        detail: `tool_use_id=${toolUseID ?? ""}`,
+        data: { tool, toolUseID, path: p, toPath },
+      } as any,
+      sid
+    );
     emit(
       {
         type: "log",
@@ -396,7 +451,16 @@ function emitStructuredOutput(args: { structured: any; push: (t: SessionTurnResu
     if (!a.name || !a.contentRef) continue;
     push({
       sessionId,
-      event: { type: "artifact", name: a.name, contentRef: a.contentRef, mime: a.mime, size: a.size, sha256: a.sha256, action: a.action, path: a.path } as any,
+      event: {
+        type: "artifact",
+        name: a.name,
+        contentRef: a.contentRef,
+        mime: a.mime,
+        size: a.size,
+        sha256: a.sha256,
+        action: a.action,
+        path: a.path,
+      } as any,
     });
   }
 
@@ -439,12 +503,41 @@ class ClaudeSessionHandle implements SessionHandle {
       const { query } = sdk as any;
 
       const queue: SessionTurnResult[] = [];
-      const push = (t: SessionTurnResult) => queue.push(t);
-
       let lastSessionId: string | undefined;
 
       const runId = self.args.runId ?? "unknown_run";
       const workspaceDir = self.args.workspaceDir ?? process.cwd();
+
+      const eventBuffer =
+      self.args.programHash && self.args.principalId
+        ? new EventBuffer(
+            {
+              v: 1, // ✅ required by AgentEventEnvelope
+              runId,
+              programHash: self.args.programHash,
+              principalId: self.args.principalId,
+              agentName: self.args.agentName!, // or undefined-safe if you prefer
+              sessionId: undefined,
+            },
+            self.args.eventBufferOptions
+          )
+        : null;
+      eventBuffer?.start();
+
+      const push = (t: SessionTurnResult) => {
+        queue.push(t);
+
+        // 2.4/2.5: stream events to control plane (buffered + signed)
+        if (eventBuffer && (t.event || t.usage)) {
+          eventBuffer.enqueue(
+            t.event ?? undefined,
+            t.usage ?? undefined,
+            {
+              agentName: self.args.agentName ?? undefined,
+              sessionId: t.sessionId ?? lastSessionId ?? undefined,
+            }
+          );        }
+      };
 
       const files = new WorkspaceFiles({
         runId,
@@ -453,10 +546,12 @@ class ClaudeSessionHandle implements SessionHandle {
         agentName: self.args.agentName,
         emit: (ev) => push({ event: ev, sessionId: lastSessionId }),
         versioning: true,
+        allowlist: self.args.workspaceAllowlist ?? undefined,
+        maxFileBytes: self.args.maxFileBytes ?? null,
+        maxWorkspaceBytes: self.args.maxWorkspaceBytes ?? null,
       });
 
       const toolTouches = new Map<string, { tool: string; checkpointId?: string; path?: string; toPath?: string }>();
-
       const hooks = mkHooksEmitter({ push, files, toolTouches, workspaceDir });
 
       const prompt = self.userText ?? "";
@@ -503,85 +598,95 @@ class ClaudeSessionHandle implements SessionHandle {
         push({ sessionId: lastSessionId, event: ev });
       };
 
-      for await (const msg of resp as AsyncIterable<any>) {
-        while (queue.length) yield queue.shift()!;
+      try {
+        for await (const msg of resp as AsyncIterable<any>) {
+          while (queue.length) yield queue.shift()!;
 
-        if (toolHandler && (msg?.type === "tool_use" || msg?.type === "tool_use_request")) {
-          const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
-          if (sid) lastSessionId = sid;
+          if (toolHandler && (msg?.type === "tool_use" || msg?.type === "tool_use_request")) {
+            const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
+            if (sid) lastSessionId = sid;
 
-          const toolUseId = msg?.tool_use_id ?? msg?.toolUseId ?? msg?.id ?? undefined;
-          const name = msg?.name ?? msg?.tool_name ?? msg?.toolName;
-          const input = msg?.input ?? msg?.tool_input ?? msg?.toolInput ?? {};
+            const toolUseId = msg?.tool_use_id ?? msg?.toolUseId ?? msg?.id ?? undefined;
+            const name = msg?.name ?? msg?.tool_name ?? msg?.toolName;
+            const input = msg?.input ?? msg?.tool_input ?? msg?.toolInput ?? {};
 
-          const r = await toolHandler({ name, input, toolUseId });
+            const r = await toolHandler({ name, input, toolUseId });
 
-          if ((r as any)?.ok) {
-            const output = (r as any).output;
+            if ((r as any)?.ok) {
+              const output = (r as any).output;
 
-            if (typeof (resp as any)?.sendToolResult === "function") {
-              await (resp as any).sendToolResult({ tool_use_id: toolUseId, output });
-            } else if (typeof (resp as any)?.toolResult === "function") {
-              await (resp as any).toolResult(toolUseId, output);
+              if (typeof (resp as any)?.sendToolResult === "function") {
+                await (resp as any).sendToolResult({ tool_use_id: toolUseId, output });
+              } else if (typeof (resp as any)?.toolResult === "function") {
+                await (resp as any).toolResult(toolUseId, output);
+              } else {
+                push({
+                  sessionId: lastSessionId,
+                  event: { type: "raw", provider: "claude", payload: { tool_result: { toolUseId, output } } } as any,
+                });
+              }
             } else {
-              push({ sessionId: lastSessionId, event: { type: "raw", provider: "claude", payload: { tool_result: { toolUseId, output } } } as any });
+              const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
+              if (typeof (resp as any)?.sendToolResult === "function") {
+                await (resp as any).sendToolResult({
+                  tool_use_id: toolUseId,
+                  error: { code: err.code, message: err.message, data: err.data },
+                });
+              }
+              push({ sessionId: lastSessionId, event: { type: "log", level: "error", message: "tool_failed", data: err } as any });
             }
-          } else {
-            const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
-            if (typeof (resp as any)?.sendToolResult === "function") {
-              await (resp as any).sendToolResult({ tool_use_id: toolUseId, error: { code: err.code, message: err.message, data: err.data } });
+
+            continue;
+          }
+
+          if (msg?.type === "result") {
+            const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
+            if (sid) lastSessionId = sid;
+
+            if (msg?.subtype === "error_max_structured_output_retries") {
+              push({
+                sessionId: lastSessionId,
+                event: { type: "log", level: "error", message: "structured_output_failed", data: { subtype: msg.subtype } } as any,
+              });
+            } else if (msg?.structured_output) {
+              emitStructuredOutput({ structured: msg.structured_output, push, sessionId: lastSessionId });
             }
-            push({ sessionId: lastSessionId, event: { type: "log", level: "error", message: "tool_failed", data: err } as any });
           }
 
-          continue;
+          const turns = mapClaudeMessageToTurns(msg);
+
+          for (const t of turns) {
+            if (t.sessionId) lastSessionId = t.sessionId;
+
+            if (!announced && lastSessionId) {
+              announced = true;
+              push({
+                sessionId: lastSessionId,
+                event: (self.args.resumeSessionId
+                  ? { type: "session_resumed", sessionId: lastSessionId }
+                  : { type: "session_started", sessionId: lastSessionId }) as any,
+              });
+            }
+
+            if (t.text) {
+              carry = ingestEventTextChunk({
+                chunk: t.text,
+                carry,
+                emit: (ev) => emitEvent(ev),
+              });
+            }
+
+            yield t;
+          }
         }
 
-        if (msg?.type === "result") {
-          const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
-          if (sid) lastSessionId = sid;
+        const tailEv = parseEventLineToAgentEvent(carry);
+        if (tailEv) push({ sessionId: lastSessionId, event: tailEv });
 
-          if (msg?.subtype === "error_max_structured_output_retries") {
-            push({
-              sessionId: lastSessionId,
-              event: { type: "log", level: "error", message: "structured_output_failed", data: { subtype: msg.subtype } } as any,
-            });
-          } else if (msg?.structured_output) {
-            emitStructuredOutput({ structured: msg.structured_output, push, sessionId: lastSessionId });
-          }
-        }
-
-        const turns = mapClaudeMessageToTurns(msg);
-
-        for (const t of turns) {
-          if (t.sessionId) lastSessionId = t.sessionId;
-
-          if (!announced && lastSessionId) {
-            announced = true;
-            push({
-              sessionId: lastSessionId,
-              event: (self.args.resumeSessionId
-                ? { type: "session_resumed", sessionId: lastSessionId }
-                : { type: "session_started", sessionId: lastSessionId }) as any,
-            });
-          }
-
-          if (t.text) {
-            carry = ingestEventTextChunk({
-              chunk: t.text,
-              carry,
-              emit: (ev) => emitEvent(ev),
-            });
-          }
-
-          yield t;
-        }
+        while (queue.length) yield queue.shift()!;
+      } finally {
+        await eventBuffer?.flushAllAndStop().catch(() => {});
       }
-
-      const tailEv = parseEventLineToAgentEvent(carry);
-      if (tailEv) push({ sessionId: lastSessionId, event: tailEv });
-
-      while (queue.length) yield queue.shift()!;
     })();
 
     return this.iter;
