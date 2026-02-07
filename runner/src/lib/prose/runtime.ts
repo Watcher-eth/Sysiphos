@@ -6,6 +6,11 @@ import type { SessionAdapter, AgentEvent } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../../s3";
 import { EventBuffer } from "../events/client";
 
+// ✅ Phase 1 tools
+import { buildRegistry } from "./tools/catalog";
+import { ToolRunner } from "./tools/runner";
+import type { ToolCtx } from "./tools/types";
+
 type Manifest = {
   runId: string;
   programHash: string;
@@ -119,6 +124,39 @@ export async function executeProse(args: {
 
   const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
 
+  // ✅ Tool registry + runner (Phase 1)
+  const registry = buildRegistry();
+
+  const toolRunner = new ToolRunner(registry, (ev: any) => {
+    // Translate any tool-runner events to your canonical AgentEvent step shape
+    // (ToolRunner in earlier plan emits {type:"step", op:"start"/"finish"...}; normalize here.)
+    if (ev?.type === "step" && ev?.op === "start") {
+      eventBuf.enqueue(
+        { type: "step", status: "started", name: String(ev.name ?? ev.toolName ?? "tool"), detail: String(ev.detail ?? "") } as any,
+        undefined,
+        { agentName: "system" }
+      );
+      return;
+    }
+    if (ev?.type === "step" && ev?.op === "finish") {
+      eventBuf.enqueue(
+        {
+          type: "step",
+          status: ev.ok ? "completed" : "failed",
+          name: String(ev.name ?? ev.toolName ?? "tool"),
+          detail: String(ev.detail ?? ""),
+          data: ev.error ? { error: ev.error } : undefined,
+        } as any,
+        undefined,
+        { agentName: "system" }
+      );
+      return;
+    }
+
+    // If it's already in AgentEvent shape, forward.
+    eventBuf.enqueue(ev as any, undefined, { agentName: "system" });
+  });
+
   async function writeBinding(binding: BindingRef, contentText: string) {
     const key = s3BindingKey(st.runId, binding.name);
     const put = await putText(key, contentText, binding.mime ?? "text/plain");
@@ -178,6 +216,51 @@ export async function executeProse(args: {
       eventBuf.enqueue(event, usage, { agentName, sessionId });
     };
 
+    // ✅ Tool context for this agent/session
+    const toolAllowlist = new Set<string>(manifest.toolAllowlist ?? []);
+    const capabilities = new Set<string>(manifest.capabilities ?? []);
+
+    const allowedDomains = new Set<string>();
+    // Phase 1: allow all only if explicitly toggled
+    if (capabilities.has("net.egress") && (manifest.env?.NET_ALLOW_ALL === "1" || process.env.NET_ALLOW_ALL === "1")) {
+      allowedDomains.add("*");
+    }
+
+    const toolCtx: ToolCtx = {
+      runId: st.runId,
+      programHash: st.programHash,
+      principalId,
+      agentName,
+      sessionId: priorSessionId ?? undefined,
+      workspaceDir,
+
+      toolAllowlist,
+      capabilities,
+
+      filePolicy: {
+        allowed: manifest.files?.map((f) => ({ path: f.path, mode: f.mode })) ?? [],
+        maxFileBytes: manifest.limits?.maxFileBytes ?? 50 * 1024 * 1024,
+      },
+
+      netPolicy: { allowedDomains },
+
+      controlPlaneBaseUrl:
+        process.env.CONTROL_PLANE_BASE_URL ||
+        manifest.env?.CONTROL_PLANE_BASE_URL ||
+        undefined,
+
+      runnerSharedSecret:
+        process.env.RUNNER_SHARED_SECRET ||
+        manifest.env?.RUNNER_SHARED_SECRET ||
+        undefined,
+    };
+
+    const toolHandler = async (call: { name: string; input: unknown; toolUseId?: string }) => {
+      const r = await toolRunner.run(toolCtx, { name: call.name, input: call.input, toolUseId: call.toolUseId });
+      if ((r as any)?.ok) return { ok: true as const, output: (r as any).output };
+      return { ok: false as const, error: (r as any).error ?? { code: "tool_failed", message: "tool_failed" } };
+    };
+
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({ name: b.name, contentRef: b.contentRef }));
 
     const promptParts = renderSessionPrompt({
@@ -187,7 +270,7 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-       const session =
+    const session =
       wantsResume && priorSessionId
         ? await adapter.resumeSession({
             sessionId: priorSessionId,
@@ -197,10 +280,9 @@ export async function executeProse(args: {
             idempotencyKey: `${st.runId}:${agentKey}:resume`,
             principalId,
             agentName,
-
-            // ✅ 5.6
             runId: st.runId,
             workspaceDir,
+            toolHandler,
           })
         : await adapter.createSession({
             model: agent?.model,
@@ -209,10 +291,9 @@ export async function executeProse(args: {
             idempotencyKey: `${st.runId}:${agentKey}:create`,
             principalId,
             agentName,
-
-            // ✅ 5.6
             runId: st.runId,
             workspaceDir,
+            toolHandler,
           });
 
     await session.send(promptParts.user);
@@ -222,13 +303,9 @@ export async function executeProse(args: {
 
     let didAnnounceSession = false;
 
-    // 5.5: structured output is the source of truth
     let lastResultTextFromEvents: string | undefined;
 
-    // 5.5: unique TODO counting (covers streamed + structured)
     const todoAddIds = new Set<string>();
-
-    // 5.5: artifact dedupe (covers streamed + structured)
     const seenArtifacts = new Set<string>();
 
     const handleEvent = (ev: any, usage?: any) => {
@@ -277,7 +354,6 @@ export async function executeProse(args: {
 
         if (msg.event) handleEvent(msg.event, msg.usage);
 
-        // keep raw text for debugging + fallback-only result extraction
         if (msg.text) full += msg.text;
 
         usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
@@ -290,7 +366,6 @@ export async function executeProse(args: {
       } catch {}
     }
 
-    // --- TODO enforcement (unique + no duplicates) ---
     if (todoAddIds.size < MIN_TODOS) {
       const sid = latestSessionId;
       const synthPrefix = `synth:${agentName}:${sid ?? "nosid"}`;
@@ -309,12 +384,9 @@ export async function executeProse(args: {
       }
     }
 
-    // --- FINAL RESULT (structured wins) ---
-    // If we got result_text event, that is authoritative. Otherwise fallback to <result>.
     const fallback = extractResultText(full);
     const finalResult = lastResultTextFromEvents ?? fallback;
 
-    // Emit result_text event only if structured did NOT produce it.
     if (!lastResultTextFromEvents) {
       handleEvent({ type: "result_text", text: finalResult } as any, undefined);
     }

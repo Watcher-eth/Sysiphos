@@ -8,7 +8,7 @@ export type SpawnManifest = {
   programHash: string;
   program: { inlineText: string };
   tools: string[];
-  capabilities: string[];
+  capabilities: Array<{ capability: string; scope: string | null }>;
   files: Array<{
     contentRef: string;
     path: string;
@@ -82,8 +82,7 @@ export async function buildSpawnManifest(params: {
     .map((p) => String(p.scope))
     .sort();
 
-  const capabilities = perms.map((p) => String(p.capability)).sort();
-
+    const capabilities = perms.map((p) => ({ capability: String(p.capability), scope: (p.scope ?? null) as string | null }));
   // 3) files
   const files = await db
     .select({
@@ -115,7 +114,6 @@ export async function buildSpawnManifest(params: {
     maxFileBytes: 50 * 1024 * 1024,
     maxArtifactBytes: 50 * 1024 * 1024,
   };
-
   const base = {
     runId,
     programHash,

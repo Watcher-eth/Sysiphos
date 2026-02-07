@@ -649,3 +649,21 @@ export const creditLedger = pgTable(
     byRun: index("credit_ledger__run_idx").on(t.runId),
   })
 );
+
+// --- tool catalog (Phase 1)
+export const toolCatalog = pgTable(
+    "tool_catalog",
+    {
+      toolName: text("tool_name").primaryKey(),
+      description: text("description").notNull().default(""),
+      inputSchema: jsonb("input_schema").notNull().default({}),
+      outputSchema: jsonb("output_schema").notNull().default({}),
+      requiredCaps: jsonb("required_caps").notNull().default([]),
+      tags: jsonb("tags").notNull().default([]),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    },
+    (t) => ({
+      byName: index("tool_catalog__name_idx").on(t.toolName),
+    })
+  );

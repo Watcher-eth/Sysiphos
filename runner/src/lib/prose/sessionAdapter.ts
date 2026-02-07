@@ -1,5 +1,4 @@
 // runner/src/prose/sessionAdapter.ts
-
 import { makeClaudeAdapter } from "./adapters/claudeV2";
 
 export interface SessionHandle {
@@ -12,20 +11,11 @@ export interface SessionAdapter {
   createSession(args: SessionCreateArgs): Promise<SessionHandle>;
   resumeSession(args: SessionCreateArgs & { sessionId: string }): Promise<SessionHandle>;
 }
-export type AgentEventBase = {
-    principalId?: string;
-    agentName?: string;
-  };
-  
-  export type TodoEvent = Extract<AgentEvent, { type: "todo" }>;
-  export type TodoOp = TodoEvent["op"];
-  
-  export type CheckpointEvent = Extract<AgentEvent, { type: "checkpoint" }>;
-  export type CheckpointOp = CheckpointEvent["op"];
-  
-  export type FileEvent = Extract<AgentEvent, { type: "file" }>;
-  export type FileOp = FileEvent["op"];
 
+export type TodoEvent = Extract<AgentEvent, { type: "todo" }>;
+export type TodoOp = TodoEvent["op"];
+
+export type AgentEventBase = { principalId?: string; agentName?: string };
 
 export type AgentEvent =
   & AgentEventBase
@@ -34,9 +24,9 @@ export type AgentEvent =
     | { type: "session_resumed"; sessionId: string }
     | { type: "thinking"; text: string }
     | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
-    | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
+    | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string; data?: any }
     | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string; data?: any }
-    | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
+    | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string; action?: string; path?: string }
     | { type: "result_text"; text: string }
     | { type: "raw"; provider: "claude"; payload: any }
     | {
@@ -50,16 +40,7 @@ export type AgentEvent =
       }
     | {
         type: "file";
-        op:
-          | "opened"
-          | "read"
-          | "created"
-          | "edited"
-          | "deleted"
-          | "moved"
-          | "copied"
-          | "mkdir"
-          | "rmdir";
+        op: "opened" | "read" | "created" | "edited" | "deleted" | "moved" | "copied" | "mkdir" | "rmdir";
         path: string;
         toPath?: string;
         bytesBefore?: number | null;
@@ -73,8 +54,19 @@ export type AgentEvent =
       }
   );
 
-  
-    
+// ✅ distributive omit over the union (this fixes your error)
+export type AgentEventPayload =
+  AgentEvent extends infer U
+    ? U extends any
+      ? Omit<U, "principalId" | "agentName">
+      : never
+    : never;
+
+export type FileEvent = Extract<AgentEvent, { type: "file" }>;
+export type FileOp = FileEvent["op"];
+export type CheckpointEvent = Extract<AgentEvent, { type: "checkpoint" }>;
+export type CheckpointOp = CheckpointEvent["op"];
+
 export type SessionTurnResult = {
   sessionId?: string;
   usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
@@ -83,11 +75,20 @@ export type SessionTurnResult = {
   text?: string;
 };
 
-export interface SessionHandle {
-  send(userText: string): Promise<void>;
-  stream(): AsyncGenerator<SessionTurnResult>;
-  close(): void;
-}
+export type ToolHandler = (call: {
+  name: string;
+  input: unknown;
+  toolUseId?: string;
+}) => Promise<
+  | { ok: true; output: any }
+  | { ok: false; error: { code: string; message: string; data?: any } }
+>;
+
+export type ClaudeToolDef = {
+  name: string;
+  description?: string;
+  input_schema?: any; // Anthropic tools input schema
+};
 
 export type SessionCreateArgs = {
   model?: string;
@@ -104,6 +105,12 @@ export type SessionCreateArgs = {
   // ✅ 5.6: allow adapters to emit file/checkpoint events correctly (no globals)
   runId?: string;
   workspaceDir?: string;
+
+  // ✅ Phase 1: tool calling
+  toolHandler?: ToolHandler;
+
+  // ✅ tools exposed to model (name/description/schema)
+  tools?: ClaudeToolDef[];
 };
 
 export function makeMockAdapter(): SessionAdapter {
@@ -146,10 +153,7 @@ export function makeMockAdapter(): SessionAdapter {
 }
 
 export async function makeAdapterFromEnv(): Promise<SessionAdapter> {
-    const provider = (process.env.AGENT_PROVIDER ?? "claude").toLowerCase();
-  
-    if (provider === "claude") return makeClaudeAdapter();
-  
-    // fallback for dev
-    return makeClaudeAdapter();
-  }
+  const provider = (process.env.AGENT_PROVIDER ?? "claude").toLowerCase();
+  if (provider === "claude") return makeClaudeAdapter();
+  return makeClaudeAdapter();
+}
