@@ -291,68 +291,179 @@ export const runs = pgTable(
   );
   
   export type RunEventType =
-    | "RUN_CREATED"
-    | "RUN_STATUS"
-    | "VM_LOG"
-    | "STEP_STARTED"
-    | "STEP_COMPLETED"
-    | "BINDING_WRITTEN"
-    | "TODO_CREATED"
-    | "TODO_UPDATED"
-    | "ARTIFACT_CREATED"
-    | "ERROR"
-    | "RUN_STATUS"
-    | "STEP_STARTED"
-    | "STEP_COMPLETED"
-    | "STEP_FAILED"
-    | "STEP_CANCELED";
+  | "RUN_STATUS"
+  | "LOG"
+  | "TODO"
+  | "STEP"
+  | "ARTIFACT"
+  | "FILE"
+  | "CHECKPOINT"
+  | "RESULT"
+  | "ERROR";
   
   export const runEvents = pgTable(
     "run_events",
     {
       id: uuid("id").primaryKey().defaultRandom(),
-      runId: uuid("run_id")
-        .notNull()
-        .references(() => runs.id, { onDelete: "cascade" }),
+      runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
   
-      // monotonic sequence per run (we'll compute as max+1 in code v1)
+      // ✅ server-assigned, monotonic within run
       seq: integer("seq").notNull(),
-      type: text("type").notNull().$type<RunEventType>(),
-      payload: jsonb("payload").notNull().default({}),
   
+      // ✅ producer idempotency
+      source: text("source").notNull().default("runner"),      // "runner" | "worker" | "control_plane"
+      sourceSeq: integer("source_seq").notNull().default(0),   // producer-local seq
+  
+      type: text("type").notNull().$type<RunEventType>(),
+  
+      agentName: text("agent_name"),
+      sessionId: text("session_id"),
+  
+      action: text("action"),
+      level: text("level"),
+  
+      todoId: text("todo_id"),
+      stepId: text("step_id"),
+      artifactId: text("artifact_id"),
+      filePath: text("file_path"),
+      checkpointId: text("checkpoint_id"),
+  
+      payload: jsonb("payload").notNull().default({}),
       createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     },
     (t) => ({
-      uniq: uniqueIndex("run_events__uniq").on(t.runId, t.seq),
+      // ✅ ordering + replay
+      uniqSeq: uniqueIndex("run_events__uniq_seq").on(t.runId, t.seq),
       byRun: index("run_events__run_idx").on(t.runId, t.seq),
+  
+      // ✅ idempotency across multiple producers
+      uniqProducer: uniqueIndex("run_events__uniq_prod").on(t.runId, t.source, t.sourceSeq),
+  
+      byType: index("run_events__type_idx").on(t.runId, t.type, t.seq),
+      bySession: index("run_events__session_idx").on(t.runId, t.sessionId, t.seq),
+      byStep: index("run_events__step_idx").on(t.runId, t.stepId, t.seq),
+      byTodo: index("run_events__todo_idx").on(t.runId, t.todoId, t.seq),
+      byFile: index("run_events__file_idx").on(t.runId, t.filePath, t.seq),
     })
   );
   
-  export type ArtifactType = "document" | "spreadsheet" | "email" | "file" | "patch" | "log";
-  
-  export const artifacts = pgTable(
-    "artifacts",
+  export type StepStatus = "started" | "completed" | "failed" | "canceled";
+
+  export const runSteps = pgTable(
+    "run_steps",
     {
       id: uuid("id").primaryKey().defaultRandom(),
-      runId: uuid("run_id")
-        .notNull()
-        .references(() => runs.id, { onDelete: "cascade" }),
+      runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
   
-      type: text("type").notNull().$type<ArtifactType>(),
-      title: text("title").notNull(),
-      // stored externally (or inline later)
-      blobKey: text("blob_key"),
-      mime: text("mime"),
-      size: integer("size"),
+      stepKey: text("step_key").notNull(), // stable identifier from events (tool_use_id or generated)
+      name: text("name").notNull(),        // "tool:Write"
+      status: text("status").notNull().$type<StepStatus>().default("started"),
   
-      createdBy: text("created_by").notNull().default("agent"), // "agent" | "user"
-      createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+      toolName: text("tool_name"),
+      toolUseId: text("tool_use_id"),
+  
+      startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+      endedAt: timestamp("ended_at", { withTimezone: true }),
+  
+      detail: text("detail").notNull().default(""),
+      payload: jsonb("payload").notNull().default({}),
     },
     (t) => ({
-      byRun: index("artifacts__run_idx").on(t.runId),
+      uniq: uniqueIndex("run_steps__uniq").on(t.runId, t.stepKey),
+      byRun: index("run_steps__run_idx").on(t.runId, t.startedAt),
+      byStatus: index("run_steps__status_idx").on(t.runId, t.status, t.startedAt),
     })
   );
-  
+
+
+  export type FileOp =
+  | "opened"
+  | "read"
+  | "created"
+  | "edited"
+  | "deleted"
+  | "moved"
+  | "copied"
+  | "mkdir"
+  | "rmdir";
+
+export const runFileOps = pgTable(
+  "run_file_ops",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+
+    op: text("op").notNull().$type<FileOp>(),
+    path: text("path").notNull(),
+
+    // optional: for diffs / tracking
+    beforeContentRef: text("before_content_ref"),
+    afterContentRef: text("after_content_ref"),
+
+    // links to checkpoints (5.6)
+    checkpointId: text("checkpoint_id"),
+
+    toolName: text("tool_name"),
+    toolUseId: text("tool_use_id"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    payload: jsonb("payload").notNull().default({}),
+  },
+  (t) => ({
+    byRun: index("run_file_ops__run_idx").on(t.runId, t.createdAt),
+    byPath: index("run_file_ops__path_idx").on(t.runId, t.path, t.createdAt),
+  })
+);
+
+export type CheckpointStatus = "created" | "restored" | "dropped";
+
+export const runCheckpoints = pgTable(
+  "run_checkpoints",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+
+    provider: text("provider").notNull().default("claude_sdk"),
+    providerCheckpointId: text("provider_checkpoint_id").notNull(),
+
+    status: text("status").notNull().$type<CheckpointStatus>().default("created"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    payload: jsonb("payload").notNull().default({}),
+  },
+  (t) => ({
+    uniq: uniqueIndex("run_checkpoints__uniq").on(t.runId, t.providerCheckpointId),
+    byRun: index("run_checkpoints__run_idx").on(t.runId, t.createdAt),
+  })
+);
+
+    export type ArtifactType = "document" | "spreadsheet" | "email" | "file" | "patch" | "log";
+
+
+    export const artifacts = pgTable(
+        "artifacts",
+        {
+          id: uuid("id").primaryKey().defaultRandom(),
+          runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
+      
+          type: text("type").notNull().$type<ArtifactType>(),
+          title: text("title").notNull(),
+      
+          contentRef: text("content_ref"), // <-- add this (matches protocol)
+          sha256: text("sha256"),
+          mime: text("mime"),
+          size: integer("size"),
+      
+          createdBy: text("created_by").notNull().default("agent"),
+          createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+        },
+        (t) => ({
+          byRun: index("artifacts__run_idx").on(t.runId),
+          uniqContent: uniqueIndex("artifacts__content_uniq").on(t.runId, t.contentRef),
+        })
+      );
+
+
   export const comments = pgTable(
     "comments",
     {
@@ -383,10 +494,9 @@ export const runs = pgTable(
     "todos",
     {
       id: uuid("id").primaryKey().defaultRandom(),
-      runId: uuid("run_id")
-        .notNull()
-        .references(() => runs.id, { onDelete: "cascade" }),
+      runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
   
+      externalId: text("external_id"), // agent todo id like "t1"
       text: text("text").notNull(),
       description: text("description").notNull().default(""),
       status: text("status").notNull().$type<TodoStatus>().default("not_started"),
@@ -397,7 +507,7 @@ export const runs = pgTable(
     },
     (t) => ({
       byRun: index("todos__run_idx").on(t.runId, t.order),
-      uniq: uniqueIndex("todos__uniq").on(t.runId, t.order),
+      byExternal: uniqueIndex("todos__external_uniq").on(t.runId, t.externalId),
     })
   );
 
@@ -427,6 +537,9 @@ export const agentSessions = pgTable(
     runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
 
     runnerSessionId: text("runner_session_id").notNull(),
+    provider: text("provider").notNull().default("anthropic"),
+    model: text("model"),
+
     agentType: text("agent_type").notNull().default("mock"),
     status: text("status").notNull().$type<AgentSessionStatus>().default("running"),
 

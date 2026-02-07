@@ -57,6 +57,13 @@
       "when": 1770348111551,
       "tag": "0007_slippery_blindfold",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1770422167773,
+      "tag": "0008_old_rhodey",
+      "breakpoints": true
     }
   ]
 }

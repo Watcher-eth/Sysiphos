@@ -13,17 +13,25 @@ export interface SessionAdapter {
   resumeSession(args: SessionCreateArgs & { sessionId: string }): Promise<SessionHandle>;
 }
 // runner/src/prose/sessionAdapter.ts
-export type AgentEvent =
-  | { type: "session_started"; sessionId?: string; agentName?: string; principalId?: string }
-  | { type: "session_resumed"; sessionId: string; agentName?: string; principalId?: string }
-  | { type: "thinking"; text: string } // optional; can be redacted/disabled
-  | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
-  | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
-  | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string }
-  | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
-  | { type: "result_text"; text: string } // final extracted <result> payload (or equivalent)
-  | { type: "raw"; provider: "claude"; payload: any };
-
+// runner/src/prose/sessionAdapter.ts
+export type AgentEventBase = {
+    principalId?: string;
+    agentName?: string;
+  };
+  
+  export type AgentEvent =
+    & AgentEventBase
+    & (
+      | { type: "session_started"; sessionId?: string }
+      | { type: "session_resumed"; sessionId: string }
+      | { type: "thinking"; text: string }
+      | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
+      | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string }
+      | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string; data?: any }
+      | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string }
+      | { type: "result_text"; text: string }
+      | { type: "raw"; provider: "claude"; payload: any }
+    );
 export type SessionTurnResult = {
   sessionId?: string;
   usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };

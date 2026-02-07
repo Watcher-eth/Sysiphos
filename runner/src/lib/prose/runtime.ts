@@ -2,25 +2,26 @@
 import type { ProseProgram, Stmt, Expr } from "./ast";
 import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
-import type { SessionAdapter } from "./sessionAdapter";
-import type { AgentEvent } from "./sessionAdapter";
-import { putText, getTextIfExists } from "../s3";
+import type { SessionAdapter, AgentEvent } from "./sessionAdapter";
+import { putText, getTextIfExists } from "../../s3";
 import { EventBuffer } from "../events/client";
 
 type Manifest = {
   runId: string;
   programHash: string;
   programText: string;
-  // ✅ who is driving this execution (user/participant/system)
   principalId?: string;
+
   toolAllowlist: string[];
   capabilities: string[];
+
   files: Array<{
     contentRef: string;
     path: string;
     mode: "ro" | "rw";
     sha256?: string | null;
   }>;
+
   env: Record<string, string>;
   limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
 };
@@ -44,7 +45,6 @@ function extractResultText(raw: string) {
   return m[1].trim();
 }
 
-// persist can be "true" | "project" | "user" | "some/path" | undefined
 function isPersistEnabled(persist?: string): boolean {
   if (!persist) return false;
   const p = persist.trim().toLowerCase();
@@ -62,6 +62,30 @@ function parseSessionIdFromMemory(memoryText: string | null): string | undefined
 function keyForAgent(principalId: string, agentName: string) {
   return `${principalId}:${agentName}`;
 }
+
+function isTodoAdd(ev: any): ev is { type: "todo"; op: "add"; id?: string; text?: string } {
+  return ev?.type === "todo" && ev?.op === "add";
+}
+
+function artifactKey(ev: any): string | null {
+  if (!ev || typeof ev !== "object") return null;
+  const contentRef = typeof ev.contentRef === "string" && ev.contentRef ? ev.contentRef : "";
+  const path = typeof ev.path === "string" && ev.path ? ev.path : "";
+  const name = typeof ev.name === "string" && ev.name ? ev.name : "";
+  if (contentRef) return `ref:${contentRef}`;
+  if (path) return `path:${path}`;
+  if (name) return `name:${name}`;
+  return null;
+}
+
+const MIN_TODOS = 5;
+const SYNTH_TODOS = [
+  "Gather context & constraints",
+  "Write a plan (steps + risks)",
+  "Execute the plan",
+  "Verify outputs & edge cases",
+  "Finalize result & next actions",
+];
 
 export async function executeProse(args: {
   manifest: Manifest;
@@ -82,13 +106,7 @@ export async function executeProse(args: {
   };
 
   const eventBuf = new EventBuffer(
-    {
-      v: 1,
-      runId: manifest.runId,
-      programHash: manifest.programHash,
-      principalId,
-      agentName: "system", // can be overridden per enqueue
-    },
+    { v: 1, runId: manifest.runId, programHash: manifest.programHash, principalId, agentName: "system" },
     { flushEveryMs: 500, maxBatch: 50, maxQueue: 2000 }
   );
 
@@ -114,19 +132,23 @@ export async function executeProse(args: {
 
   async function evalExpr(expr: Expr): Promise<{ text?: string; ref?: BindingRef }> {
     if (expr.kind === "string") return { text: expr.value };
+
     if (expr.kind === "var") {
       const ref = st.bindings.get(expr.name);
       if (!ref) throw new Error(`runtime_unknown_var: ${expr.name}`);
       return { ref };
     }
+
     if (expr.kind === "call_session") {
       const text = await runSession({ title: expr.title, agentName: expr.agentName, isResume: false });
       return { text };
     }
+
     if (expr.kind === "call_resume") {
       const text = await runSession({ title: expr.title, agentName: expr.agentName, isResume: true });
       return { text };
     }
+
     return {};
   }
 
@@ -147,15 +169,11 @@ export async function executeProse(args: {
 
     if (priorSessionId && persistOn) st.agentSessionIds.set(agentKey, priorSessionId);
 
-    // ---- event helper (per-session) ----
     const emit = (event: AgentEvent, usage?: any, sessionId?: string) => {
-        eventBuf.enqueue(event, usage, { agentName, sessionId });
-      };
+      eventBuf.enqueue(event, usage, { agentName, sessionId });
+    };
 
-    const contextRefs = Array.from(st.bindings.values()).map((b) => ({
-      name: b.name,
-      contentRef: b.contentRef,
-    }));
+    const contextRefs = Array.from(st.bindings.values()).map((b) => ({ name: b.name, contentRef: b.contentRef }));
 
     const promptParts = renderSessionPrompt({
       title: args2.title,
@@ -188,35 +206,105 @@ export async function executeProse(args: {
 
     let full = "";
     let latestSessionId: string | undefined;
+
     let didAnnounceSession = false;
 
-    for await (const msg of session.stream()) {
-      latestSessionId = msg.sessionId ?? latestSessionId;
+    // 5.5: structured output is the source of truth
+    let lastResultTextFromEvents: string | undefined;
 
-      if (latestSessionId && !didAnnounceSession) {
+    // 5.5: unique TODO counting (covers streamed + structured)
+    const todoAddIds = new Set<string>();
+
+    // 5.5: artifact dedupe (covers streamed + structured)
+    const seenArtifacts = new Set<string>();
+
+    const handleEvent = (ev: any, usage?: any) => {
+      if (!ev) return;
+
+      if (ev.type === "session_started" || ev.type === "session_resumed") {
         didAnnounceSession = true;
-        emit(
-          wantsResume
-            ? { type: "session_resumed", sessionId: latestSessionId, agentName, principalId } as any
-            : { type: "session_started", sessionId: latestSessionId, agentName, principalId } as any,
-          undefined,
-          latestSessionId
-        );
       }
 
-      if (msg.event) {
-        emit(msg.event as any, msg.usage, latestSessionId);
+      if (isTodoAdd(ev)) {
+        if (typeof ev.id === "string" && ev.id) {
+          todoAddIds.add(ev.id);
+        } else if (typeof ev.text === "string" && ev.text.trim()) {
+          todoAddIds.add(`text:${ev.text.trim()}`);
+        }
       }
 
-      // accumulate assistant chunks for <result> extraction
-      if (msg.text) full += msg.text;
+      if (ev.type === "artifact") {
+        const key = artifactKey(ev);
+        if (key) {
+          if (seenArtifacts.has(key)) return;
+          seenArtifacts.add(key);
+        }
+      }
 
-      usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
-      usageAgg.tokensOut += msg.usage?.tokensOut ?? 0;
-      usageAgg.costCredits += msg.usage?.costCredits ?? 0;
+      if (ev.type === "result_text") {
+        const t = typeof ev.text === "string" ? ev.text.trim() : "";
+        if (t) lastResultTextFromEvents = t;
+      }
+
+      emit(ev as any, usage, latestSessionId);
+    };
+
+    try {
+      for await (const msg of session.stream()) {
+        latestSessionId = msg.sessionId ?? latestSessionId;
+
+        if (latestSessionId && !didAnnounceSession) {
+          didAnnounceSession = true;
+          handleEvent(
+            args2.isResume
+              ? ({ type: "session_resumed", sessionId: latestSessionId } as any)
+              : ({ type: "session_started", sessionId: latestSessionId } as any)
+          );
+        }
+
+        if (msg.event) handleEvent(msg.event, msg.usage);
+
+        // keep raw text for debugging + fallback-only result extraction
+        if (msg.text) full += msg.text;
+
+        usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
+        usageAgg.tokensOut += msg.usage?.tokensOut ?? 0;
+        usageAgg.costCredits += msg.usage?.costCredits ?? 0;
+      }
+    } finally {
+      try {
+        session.close();
+      } catch {}
     }
 
-    session.close();
+    // --- TODO enforcement (unique + no duplicates) ---
+    if (todoAddIds.size < MIN_TODOS) {
+      const sid = latestSessionId;
+      const synthPrefix = `synth:${agentName}:${sid ?? "nosid"}`;
+      for (let i = 0; i < MIN_TODOS; i++) {
+        handleEvent(
+          {
+            type: "todo",
+            op: "add",
+            id: `${synthPrefix}:t${i + 1}`,
+            text: SYNTH_TODOS[i] ?? `Task ${i + 1}`,
+            status: "not_started",
+            data: { synthetic: true },
+          } as any,
+          undefined
+        );
+      }
+    }
+
+    // --- FINAL RESULT (structured wins) ---
+    // If we got result_text event, that is authoritative. Otherwise fallback to <result>.
+    const fallback = extractResultText(full);
+    const finalResult = lastResultTextFromEvents ?? fallback;
+
+    // Emit result_text event only if structured did NOT produce it.
+    if (!lastResultTextFromEvents) {
+      handleEvent({ type: "result_text", text: finalResult } as any, undefined);
+    }
 
     if (persistOn && latestSessionId) st.agentSessionIds.set(agentKey, latestSessionId);
 
@@ -233,7 +321,7 @@ export async function executeProse(args: {
       await putText(key, mem, "text/markdown");
     }
 
-    return extractResultText(full);
+    return finalResult;
   }
 
   async function execStmt(stmt: Stmt): Promise<void> {
@@ -241,15 +329,13 @@ export async function executeProse(args: {
       case "comment":
         return;
 
-      case "session": {
+      case "session":
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: false });
         return;
-      }
 
-      case "resume": {
+      case "resume":
         await runSession({ title: stmt.title, agentName: stmt.agentName, isResume: true });
         return;
-      }
 
       case "let": {
         const v = await evalExpr(stmt.expr);
@@ -272,19 +358,14 @@ export async function executeProse(args: {
           if (stmt.catchBody) {
             const msg = String(err?.message ?? err);
             if (stmt.catchName) {
-              await writeBinding(
-                { name: stmt.catchName, kind: "let", contentRef: "", mime: "text/plain" },
-                msg
-              );
+              await writeBinding({ name: stmt.catchName, kind: "let", contentRef: "", mime: "text/plain" }, msg);
             }
             for (const s of stmt.catchBody) await execStmt(s);
           } else {
             throw err;
           }
         } finally {
-          if (stmt.finallyBody) {
-            for (const s of stmt.finallyBody) await execStmt(s);
-          }
+          if (stmt.finallyBody) for (const s of stmt.finallyBody) await execStmt(s);
         }
         return;
       }
@@ -321,9 +402,7 @@ export async function executeProse(args: {
       }
 
       case "repeat": {
-        for (let k = 0; k < stmt.n; k++) {
-          for (const s of stmt.body) await execStmt(s);
-        }
+        for (let k = 0; k < stmt.n; k++) for (const s of stmt.body) await execStmt(s);
         return;
       }
 
@@ -333,12 +412,11 @@ export async function executeProse(args: {
     }
   }
 
-  for (const stmt of program.statements) {
-    await execStmt(stmt);
+  try {
+    for (const stmt of program.statements) await execStmt(stmt);
+  } finally {
+    await eventBuf.flushAllAndStop().catch(() => {});
   }
-
-  // ✅ important: flush events before returning
-  await eventBuf.flushAllAndStop();
 
   const wallClockMs = Date.now() - startedAt;
   return {

@@ -1,16 +1,18 @@
 // worker/src/activities.ts
-import { eq, max } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db, schema } from "../../src/lib/db";
 import { spawnRunnerSession } from "./runnerClient";
 import { settleRunHold } from "../../src/lib/billing/ledger";
+import { postWorkerEvents, type WorkerEventEnvelope } from "./eventsClient";
 
-async function nextSeq(runId: string): Promise<number> {
-  const row = await db
-    .select({ m: max(schema.runEvents.seq) })
-    .from(schema.runEvents)
-    .where(eq(schema.runEvents.runId, runId as any));
-
-  return (row[0]?.m ?? 0) + 1;
+let _workerSeq = 0;
+function mkWorkerEvt(args: Omit<WorkerEventEnvelope, "v" | "sourceSeq" | "ts">): WorkerEventEnvelope {
+  return {
+    v: 1,
+    ...args,
+    sourceSeq: ++_workerSeq,
+    ts: new Date().toISOString(),
+  };
 }
 
 async function getRunWorkspaceId(runId: string): Promise<string> {
@@ -27,15 +29,24 @@ async function getRunWorkspaceId(runId: string): Promise<string> {
 
 export async function writeEvent(args: {
   runId: string;
-  type: schema.RunEventType;
-  payload: any;
+  programHash: string;
+  principalId: string;
+  event: any; // AgentEvent-ish (type, etc)
 }) {
-  const seq = await nextSeq(args.runId);
-  await db.insert(schema.runEvents).values({
-    runId: args.runId as any,
-    seq,
-    type: args.type,
-    payload: args.payload ?? {},
+  await postWorkerEvents({
+    runId: args.runId,
+    programHash: args.programHash,
+    principalId: args.principalId,
+    events: [
+      mkWorkerEvt({
+        runId: args.runId,
+        programHash: args.programHash,
+        principalId: args.principalId,
+        agentName: "temporal",
+        sessionId: undefined,
+        event: args.event,
+      }),
+    ],
   });
 }
 
@@ -46,103 +57,26 @@ export async function setRunStatus(args: { runId: string; status: schema.RunStat
     .where(eq(schema.runs.id, args.runId as any));
 }
 
-export async function createTodo(args: { runId: string; text: string; order: number }) {
-  const id = crypto.randomUUID();
-
-  await db.insert(schema.todos).values({
-    id: id as any,
-    runId: args.runId as any,
-    text: args.text,
-    order: args.order,
-    status: "not_started",
-  });
-
-  await writeEvent({
-    runId: args.runId,
-    type: "TODO_CREATED",
-    payload: { id, text: args.text, order: args.order },
-  });
-
-  return { id };
-}
-
-async function upsertContentBlob(args: {
-  contentRef: string;
-  sha256?: string;
-  size?: number;
-  mime?: string;
-}) {
+export async function createTodo(args: { runId: string; text: string; order: number; externalId?: string }) {
   await db
-    .insert(schema.contentBlobs)
-    .values({
-      contentRef: args.contentRef,
-      sha256: args.sha256,
-      size: args.size,
-      mime: args.mime,
-    } as any)
-    // @ts-ignore
-    .onConflictDoUpdate({
-      target: [schema.contentBlobs.contentRef],
-      set: {
-        sha256: args.sha256,
-        size: args.size,
-        mime: args.mime,
-      },
-    });
-}
-
-export async function writeBinding(args: {
-  runId: string;
-  name: string;
-  kind: schema.BindingKind;
-  contentRef: string;
-  contentPreview?: string;
-  summary?: string;
-  sha256?: string;
-  size?: number;
-  mime?: string;
-}) {
-  await upsertContentBlob({
-    contentRef: args.contentRef,
-    sha256: args.sha256,
-    size: args.size,
-    mime: args.mime,
-  });
-
-  await db
-    .insert(schema.bindings)
+    .insert(schema.todos)
     .values({
       runId: args.runId as any,
-      name: args.name,
-      kind: args.kind,
-      executionId: null,
-      contentRef: args.contentRef,
-      contentPreview: args.contentPreview ?? null,
-      summary: args.summary ?? null,
+      externalId: args.externalId ?? `wf_t${args.order}`,
+      text: args.text,
+      order: args.order,
+      status: "not_started",
     } as any)
     // @ts-ignore
-    .onConflictDoUpdate({
-      target: [schema.bindings.runId, schema.bindings.name, schema.bindings.executionId],
-      set: {
-        contentRef: args.contentRef,
-        contentPreview: args.contentPreview ?? null,
-        summary: args.summary ?? null,
-      },
+    .onConflictDoNothing({
+      target: [schema.todos.runId, schema.todos.externalId],
     });
 
-  await writeEvent({
-    runId: args.runId,
-    type: "BINDING_WRITTEN",
-    payload: { name: args.name, kind: args.kind, contentRef: args.contentRef },
-  });
+  return { externalId: args.externalId ?? `wf_t${args.order}` };
 }
 
-// Runner session: spawn + persist session + write bindings.
-// (No billing settle here; workflow finally does it.)
 export async function SpawnSessionAndWait(args: { runId: string; programHash: string }) {
   const agentType = "mock";
-
-  // ✅ stable across Temporal retries
   const idempotencyKey = `spawn:${args.runId}:${args.programHash}:${agentType}`;
 
   const resp = await spawnRunnerSession({
@@ -154,7 +88,6 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
 
   if (!resp?.sessionId) throw new Error("runner_missing_sessionId");
 
-  // Idempotent under retries (requires uniq index on (run_id, runner_session_id))
   await db
     .insert(schema.agentSessions)
     .values({
@@ -166,23 +99,11 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
     } as any)
     // @ts-ignore
     .onConflictDoNothing({
-      target: [schema.agentSessions.runId, schema.agentSessions.runnerSessionId],
+      target: [schema.agentSessions.runnerSessionId],
     });
 
-  const outputs = Array.isArray(resp.outputs) ? resp.outputs : [];
-  for (const o of outputs) {
-    await writeBinding({
-      runId: args.runId,
-      name: o.bindingName,
-      kind: o.kind as any,
-      contentRef: o.contentRef,
-      contentPreview: o.preview,
-      summary: o.summary,
-      sha256: o.sha256,
-      size: o.size,
-      mime: o.mime,
-    });
-  }
+  // NOTE: bindings are written by runner -> control plane events + S3 in your architecture.
+  // If you still want to mirror bindings here, keep your writeBinding() path.
 
   return resp;
 }
@@ -204,17 +125,16 @@ export async function settleRunBilling(args: {
     reason: `settle_${args.status}`,
   });
 
-  try {
-    await writeEvent({
-      runId: args.runId,
-      type: "BILLING_SETTLED" as any,
-      payload: {
-        status: args.status,
-        actualCost,
-        ...settled,
-      },
-    });
-  } catch {
-    // no-op if event type not added yet
-  }
+  // Emit as LOG (or FILE/RESULT/etc) — your mapper will store it
+  await writeEvent({
+    runId: args.runId,
+    programHash: "unknown", // pass real value from workflow (recommended)
+    principalId: "system",
+    event: {
+      type: "log",
+      level: "info",
+      message: "billing_settled",
+      data: { status: args.status, actualCost, ...settled },
+    },
+  });
 }

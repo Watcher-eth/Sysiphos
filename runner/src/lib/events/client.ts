@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { env } from "../env";
+import { env } from "../../env";
 import type { AgentEventEnvelope } from "./types";
 
 function hmacHex(secret: string, message: string) {
@@ -50,6 +50,7 @@ export async function postEvents(args: PostEventsArgs): Promise<void> {
     runId: args.runId,
     programHash: args.programHash,
     principalId: args.principalId,
+    source: "runner",
     events: args.events,
   };
 
@@ -107,27 +108,20 @@ export class EventBuffer {
     this.timer = null;
   }
 
-  enqueue(
-    event: AgentEventEnvelope["event"],
-    usage?: AgentEventEnvelope["usage"],
-    override?: Partial<Pick<AgentEventEnvelope, "agentName" | "sessionId">>
-  ) {   
+  enqueue(event: AgentEventEnvelope["event"], usage?: AgentEventEnvelope["usage"], override?: Partial<Pick<AgentEventEnvelope, "agentName" | "sessionId">>) {
     const envlp: AgentEventEnvelope = {
-        ...this.base,
-        ...(override ?? {}),
-        seq: ++this.seq,
-        ts: new Date().toISOString(),
-        event,
-        usage,
-      };
+      ...this.base,
+      ...(override ?? {}),
+      sourceSeq: ++this.seq,
+      ts: new Date().toISOString(),
+      event,
+      usage,
+    };
 
     this.q.push(envlp);
-
-    // bounded queue: drop oldest
-    if (this.q.length > this.opts.maxQueue) {
-      this.q.splice(0, this.q.length - this.opts.maxQueue);
-    }
+    if (this.q.length > this.opts.maxQueue) this.q.splice(0, this.q.length - this.opts.maxQueue);
   }
+
 
   async flush() {
     if (!env.controlPlaneBaseUrl) return;

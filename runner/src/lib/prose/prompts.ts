@@ -60,7 +60,8 @@ export type PromptParts = {
       `- step started Verify\n` +
       `- step completed Verify\n\n` +
       `If you need more context, emit a todo(add) describing exactly what you need.\n` +
-      `</protocol>\n`;
+      `</protocol>\n`
+      
   
     const instructions =
       `\n<instructions>\n` +
@@ -68,7 +69,8 @@ export type PromptParts = {
       `- Be precise and follow the task exactly.\n` +
       `- Keep non-event narrative minimal outside <result>.\n` +
       `- Return the final answer inside <result>...</result>.\n` +
-      `- The <result> MUST contain only the final answer (no @event lines).\n` +
+      `- At the end, your final answer MUST be representable as structured JSON matching the provided schema.\n` +
+      `- The <result> MUST contain only the human-readable final answer (no @event lines).\n` +
       `</instructions>\n`;
   
     const user =

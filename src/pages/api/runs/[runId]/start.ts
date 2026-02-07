@@ -2,7 +2,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
-import { appendRunEvent } from "@/lib/sse";
 
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
@@ -21,6 +20,12 @@ import {
 import { compileAndPinRun } from "@/lib/runs/compileRun";
 import { reserveForRun } from "@/lib/billing/ledger";
 
+// IMPORTANT:
+// - With the new event ingestion model, "start" should NOT directly insert run_events.
+// - The worker and runner will post events to /api/runs/events (server assigns seq).
+// - This endpoint just validates access, ensures program is pinned, places a billing hold,
+//   sets status=queued, and starts (or reuses) the Temporal workflow.
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") return res.status(405).end();
 
@@ -31,7 +36,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const runId = req.query.runId as string;
   if (!runId) return res.status(400).send("Missing runId");
 
-  // load run (incl workspace for membership check + existing temporal workflow id)
+  // Load run for membership check and workflow id handling
   const runRow = await db
     .select({
       id: schema.runs.id,
@@ -45,7 +50,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const run = runRow[0];
   if (!run) return res.status(404).send("Run not found");
 
-  // membership check
+  // Membership check
   const membership = await db
     .select({ userId: schema.workspaceMembers.userId })
     .from(schema.workspaceMembers)
@@ -59,7 +64,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (!membership[0]) return res.status(403).send("Forbidden");
 
-  // ensure pinned program exists; if missing, compile + pin (idempotent)
+  // Ensure pinned program exists; if missing, compile + pin (idempotent)
   const pinned0 = await db
     .select({
       programHash: schema.runs.programHash,
@@ -74,7 +79,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!out.ok) return res.status(out.status).send(out.error);
   }
 
-  // re-read pinned after potential compile
+  // Re-read pinned after potential compile
   const pinned = await db
     .select({
       programHash: schema.runs.programHash,
@@ -88,7 +93,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(500).send("Compile failed to pin program");
   }
 
-  // verify pinned program matches authoritative run_programs row
+  // Verify pinned program matches authoritative run_programs row
   const programRow = await db
     .select({
       programHash: schema.runPrograms.programHash,
@@ -101,7 +106,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(409).send("Pinned program mismatch. Re-compile.");
   }
 
-  // billing preflight (v1 fixed hold) — idempotent by runId
+  // Billing preflight (v1 fixed hold) — idempotent by runId
   const estCost = 1;
 
   const hold = await reserveForRun({
@@ -119,29 +124,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       required: estCost,
     });
   }
-  // RUN_CREATED only once
-  const alreadyCreated = await db
-    .select({ id: schema.runEvents.id })
-    .from(schema.runEvents)
-    .where(
-      and(
-        eq(schema.runEvents.runId, runId as any),
-        eq(schema.runEvents.type, "RUN_CREATED")
-      )
-    )
-    .limit(1);
 
-  if (!alreadyCreated[0]) {
-    await appendRunEvent(runId, "RUN_CREATED", { runId });
-  }
-
-  // set queued before starting (idempotent)
+  // Set queued before starting (idempotent)
   await db
     .update(schema.runs)
     .set({ status: "queued", updatedAt: new Date() })
     .where(eq(schema.runs.id, runId as any));
 
-  // don't overwrite workflow id if already set
+  // Don't overwrite workflow id if already set
   const workflowId = run.temporalWorkflowId ?? proseWorkflowId(runId);
 
   if (!run.temporalWorkflowId) {
@@ -151,7 +141,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .where(eq(schema.runs.id, runId as any));
   }
 
-  const conn = await Connection.connect({ address: process.env.TEMPORAL_ADDRESS! });
+  const conn = await Connection.connect({
+    address: process.env.TEMPORAL_ADDRESS!,
+  });
+
   const client = new Client({
     connection: conn,
     namespace: process.env.TEMPORAL_NAMESPACE ?? "default",
@@ -167,5 +160,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!(e instanceof WorkflowExecutionAlreadyStartedError)) throw e;
   }
 
-  return res.status(200).json({ ok: true, workflowId });
+  return res.status(200).json({
+    ok: true,
+    workflowId,
+    runId,
+    programHash: pinned[0].programHash,
+  });
 }

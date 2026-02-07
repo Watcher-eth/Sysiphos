@@ -1,9 +1,9 @@
 // runner/src/index.ts
 import { env } from "./env";
 import { assertRunnerAuth, HttpError } from "./auth";
-import { parseProse } from "./prose/parse";
-import { executeProse } from "./prose/runtime";
-import { makeAdapterFromEnv } from "./prose/sessionAdapter";
+import { parseProse } from "./lib/prose/parse";
+import { executeProse } from "./lib/prose/runtime";
+import { makeAdapterFromEnv } from "./lib/prose/sessionAdapter";
 
 type SpawnSessionBody = {
   runId: string;

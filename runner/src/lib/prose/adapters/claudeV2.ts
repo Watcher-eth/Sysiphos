@@ -14,6 +14,68 @@ import type {
   
   type ClaudeMessage = any;
   
+  const RUN_OUTPUT_SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      result_text: { type: "string" },
+  
+      todos: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            op: { type: "string", enum: ["add", "update", "complete"] },
+            id: { type: "string" },
+            text: { type: "string" },
+            status: { type: "string" },
+          },
+          required: ["op", "id"],
+        },
+      },
+  
+      artifacts: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string" },
+            contentRef: { type: "string" },
+            mime: { type: "string" },
+            size: { type: "number" },
+            sha256: { type: "string" },
+  
+            // optional (helps UI)
+            action: { type: "string", enum: ["created", "updated", "deleted", "unknown"] },
+            path: { type: "string" },
+          },
+          required: ["name", "contentRef"],
+        },
+      },
+  
+      next_actions: {
+        type: "array",
+        items: { type: "string" },
+      },
+  
+      errors: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            code: { type: "string" },
+            message: { type: "string" },
+          },
+          required: ["message"],
+        },
+      },
+    },
+    required: ["result_text"],
+  } as const;
+  
   function nowIso() {
     return new Date().toISOString();
   }
@@ -23,15 +85,8 @@ import type {
    *
    * Supported shapes:
    *  1) @event <type> <json>
-   *     e.g. @event todo {"op":"add","id":"t1","text":"Do X"}
-   *
    *  2) @event <type> <subtype> <json>
-   *     e.g. @event step started {"name":"tool:Write","detail":"..."}
-   *
    *  3) @event log info <free text>
-   *     e.g. @event log info something happened
-   *
-   * Anything unrecognized becomes a log event (level=info) with raw payload.
    */
   function parseEventLineToAgentEvent(line: string): AgentEvent | null {
     const s = line.trim();
@@ -44,7 +99,7 @@ import type {
     const type = parts[0];
     const sub = parts.length > 1 ? parts[1] : undefined;
   
-    const payloadStr = rest.slice(type.length).trim(); // includes subtype + payload
+    const payloadStr = rest.slice(type.length).trim();
     const payloadAfterSubtype =
       sub && payloadStr.startsWith(sub) ? payloadStr.slice(sub.length).trim() : payloadStr;
   
@@ -59,71 +114,47 @@ import type {
       }
     };
   
-    // ---- TODO ----
     if (type === "todo") {
       const json = tryParseJson(payloadAfterSubtype);
-      if (json && typeof json === "object") {
-        // expect {op,id,text,status?,order?,description?}
-        return { type: "todo", ...(json as any) } as any;
-      }
+      if (json && typeof json === "object") return { type: "todo", ...(json as any) } as any;
   
-      // allow: "@event todo add some text..."
       const op = sub ?? "add";
       const text = payloadAfterSubtype;
       if (text) return { type: "todo", op, text } as any;
       return { type: "todo", op } as any;
     }
   
-    // ---- STEP ----
     if (type === "step") {
       const status = sub ?? "started";
       const json = tryParseJson(payloadAfterSubtype);
-      if (json && typeof json === "object") {
-        return { type: "step", status, ...(json as any) } as any;
-      }
-      // allow: "@event step started name=... detail=..."
+      if (json && typeof json === "object") return { type: "step", status, ...(json as any) } as any;
       const detail = payloadAfterSubtype;
       return { type: "step", status, detail } as any;
     }
   
-    // ---- LOG ----
     if (type === "log") {
       const level = sub ?? "info";
       const json = tryParseJson(payloadAfterSubtype);
-      if (json && typeof json === "object") {
-        return { type: "log", level, ...(json as any) } as any;
-      }
+      if (json && typeof json === "object") return { type: "log", level, ...(json as any) } as any;
       const msg = payloadAfterSubtype;
       return { type: "log", level, message: msg || "log" } as any;
     }
   
-    // ---- ARTIFACT ----
     if (type === "artifact") {
       const json = tryParseJson(payloadAfterSubtype);
-      if (json && typeof json === "object") {
-        return { type: "artifact", ...(json as any) } as any;
-      }
+      if (json && typeof json === "object") return { type: "artifact", ...(json as any) } as any;
       const text = payloadAfterSubtype;
       return { type: "artifact", title: text || "artifact" } as any;
     }
   
-    // ---- RESULT ----
     if (type === "result" || type === "result_text") {
       const json = tryParseJson(payloadAfterSubtype);
-      if (json && typeof json === "object") {
-        return { type: "result_text", ...(json as any) } as any;
-      }
+      if (json && typeof json === "object") return { type: "result_text", ...(json as any) } as any;
       const text = payloadAfterSubtype;
       return { type: "result_text", text: text || "" } as any;
     }
   
-    // unknown → log
-    return {
-      type: "log",
-      level: "info",
-      message: "unknown_event",
-      data: { raw: s },
-    } as any;
+    return { type: "log", level: "info", message: "unknown_event", data: { raw: s } } as any;
   }
   
   /**
@@ -137,7 +168,6 @@ import type {
   }): string {
     const { chunk, emit } = args;
     let buf = (args.carry || "") + (chunk || "");
-    // normalize newlines; keep \n splitting predictable
     buf = buf.replace(/\r\n/g, "\n");
   
     const lines = buf.split("\n");
@@ -152,7 +182,6 @@ import type {
   }
   
   // Minimal mapper from SDK messages -> SessionTurnResult (text + usage only).
-  // Hook events + @event parsing fill in SessionTurnResult.event.
   function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
     const out: SessionTurnResult[] = [];
   
@@ -194,6 +223,20 @@ import type {
     toolUseID: string | null,
     ctx: { signal: AbortSignal }
   ) => Promise<any>;
+  
+  function tryGetToolPath(input: any): string | undefined {
+    const ti = input?.tool_input ?? input?.toolInput;
+    if (!ti || typeof ti !== "object") return undefined;
+    return (
+      ti.path ??
+      ti.file_path ??
+      ti.filePath ??
+      ti.filename ??
+      ti.file ??
+      ti.target ??
+      undefined
+    );
+  }
   
   function mkHooksEmitter(params: { push: (t: SessionTurnResult) => void }) {
     const { push } = params;
@@ -239,55 +282,88 @@ import type {
     const preToolUse: HookCallback = async (input, toolUseID) => {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+  
       emit(
         {
           type: "step",
           status: "started",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
+          data: {
+            tool,
+            toolUseID,
+            path: tryGetToolPath(input),
+          },
         } as any,
         sid
       );
+  
+      // Optional: "integration used" breadcrumb
+      emit(
+        {
+          type: "log",
+          level: "info",
+          message: "tool_access",
+          data: { tool, toolUseID, path: tryGetToolPath(input) },
+        } as any,
+        sid
+      );
+  
       return {};
     };
   
     const postToolUse: HookCallback = async (input, toolUseID) => {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+      const path = tryGetToolPath(input);
+  
       emit(
         {
           type: "step",
           status: "completed",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
+          data: { tool, toolUseID, path },
         } as any,
         sid
       );
   
-      // Best-effort: surface likely file modifications as artifacts/logs.
-      if (tool === "Write" || tool === "Edit") {
+      // Best-effort: surface likely file mutations as explicit artifact events
+      if (tool === "Write" || tool === "Edit" || tool === "Mkdir" || tool === "Rm") {
+        const action =
+          tool === "Write" ? "created" :
+          tool === "Edit" ? "updated" :
+          tool === "Mkdir" ? "created" :
+          tool === "Rm" ? "deleted" :
+          "unknown";
+  
         emit(
           {
-            type: "log",
-            level: "info",
-            message: `file_modified_via_${tool}`,
-            data: { toolUseID, tool_input: input?.tool_input ?? input?.toolInput },
+            type: "artifact",
+            name: path ?? `via:${tool}`,
+            contentRef: "",
+            action,
+            path,
+            data: { tool, toolUseID, tool_input: input?.tool_input ?? input?.toolInput },
           } as any,
           sid
         );
       }
+  
       return {};
     };
   
     const postToolUseFailure: HookCallback = async (input, toolUseID) => {
       const sid = input?.session_id ?? input?.sessionId;
       const tool = input?.tool_name ?? input?.toolName ?? "unknown";
+  
       emit(
         {
           type: "step",
           status: "failed",
           name: `tool:${tool}`,
           detail: `tool_use_id=${toolUseID ?? ""}`,
+          data: { tool, toolUseID, path: tryGetToolPath(input) },
         } as any,
         sid
       );
@@ -310,16 +386,70 @@ import type {
     };
   
     return {
-      // lifecycle
       SessionStart: [{ hooks: [sessionStart] }],
       SessionEnd: [{ hooks: [sessionEnd] }],
       Notification: [{ hooks: [notification] }],
   
-      // tool pipeline
       PreToolUse: [{ hooks: [preToolUse] }],
       PostToolUse: [{ hooks: [postToolUse] }],
       PostToolUseFailure: [{ hooks: [postToolUseFailure] }],
     };
+  }
+  
+  function emitStructuredOutput(args: {
+    structured: any;
+    push: (t: SessionTurnResult) => void;
+    sessionId?: string;
+  }) {
+    const { structured, push, sessionId } = args;
+    if (!structured || typeof structured !== "object") return;
+  
+    const todos = Array.isArray(structured.todos) ? structured.todos : [];
+    for (const t of todos) {
+      if (!t || typeof t !== "object") continue;
+      if (!t.op || !t.id) continue;
+      push({ sessionId, event: { type: "todo", op: t.op, id: t.id, text: t.text, status: t.status } as any });
+    }
+  
+    const artifacts = Array.isArray(structured.artifacts) ? structured.artifacts : [];
+    for (const a of artifacts) {
+      if (!a || typeof a !== "object") continue;
+      if (!a.name || !a.contentRef) continue;
+      push({
+        sessionId,
+        event: {
+          type: "artifact",
+          name: a.name,
+          contentRef: a.contentRef,
+          mime: a.mime,
+          size: a.size,
+          sha256: a.sha256,
+          action: a.action,
+          path: a.path,
+        } as any,
+      });
+    }
+  
+    const next = Array.isArray(structured.next_actions) ? structured.next_actions : [];
+    if (next.length) {
+      push({
+        sessionId,
+        event: { type: "log", level: "info", message: "next_actions", data: { next_actions: next } } as any,
+      });
+    }
+  
+    const errs = Array.isArray(structured.errors) ? structured.errors : [];
+    for (const e of errs) {
+      if (!e || typeof e !== "object") continue;
+      push({
+        sessionId,
+        event: { type: "log", level: "error", message: e.message ?? "error", data: { code: e.code } } as any,
+      });
+    }
+  
+    if (typeof structured.result_text === "string") {
+      push({ sessionId, event: { type: "result_text", text: structured.result_text } as any });
+    }
   }
   
   class ClaudeSessionHandle implements SessionHandle {
@@ -356,11 +486,11 @@ import type {
           ...(self.args.resumeSessionId ? { resume: self.args.resumeSessionId } : {}),
           ...(self.args.system ? { system: self.args.system } : {}),
           hooks,
+          outputFormat: { type: "json_schema", schema: RUN_OUTPUT_SCHEMA },
         };
   
         const resp = query({ prompt, options });
   
-        // @event parsing state (streaming-safe)
         let carry = "";
         let lastSessionId: string | undefined;
         let announced = false;
@@ -370,14 +500,37 @@ import type {
         };
   
         for await (const msg of resp as AsyncIterable<any>) {
-          // drain hook-emitted queue first
           while (queue.length) yield queue.shift()!;
   
+          // structured outputs (final contract)
+          if (msg?.type === "result") {
+            const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
+            if (sid) lastSessionId = sid;
+  
+            if (msg?.subtype === "error_max_structured_output_retries") {
+              push({
+                sessionId: lastSessionId,
+                event: {
+                  type: "log",
+                  level: "error",
+                  message: "structured_output_failed",
+                  data: { subtype: msg.subtype },
+                } as any,
+              });
+            } else if (msg?.structured_output) {
+              emitStructuredOutput({
+                structured: msg.structured_output,
+                push,
+                sessionId: lastSessionId,
+              });
+            }
+          }
+  
           const turns = mapClaudeMessageToTurns(msg);
+  
           for (const t of turns) {
             if (t.sessionId) lastSessionId = t.sessionId;
   
-            // announce resumed/started once we actually know a sessionId (hooks sometimes fire first, sometimes not)
             if (!announced && lastSessionId) {
               announced = true;
               push({
@@ -388,7 +541,6 @@ import type {
               });
             }
   
-            // fallback parse @event lines from assistant text
             if (t.text) {
               carry = ingestEventTextChunk({
                 chunk: t.text,
@@ -401,7 +553,6 @@ import type {
           }
         }
   
-        // final drain of any remaining @event in tail (only if it’s a complete single-line event)
         const tailEv = parseEventLineToAgentEvent(carry);
         if (tailEv) push({ sessionId: lastSessionId, event: tailEv });
   
@@ -420,13 +571,8 @@ import type {
         return new ClaudeSessionHandle(args, args.model);
       },
   
-      async resumeSession(
-        args: SessionCreateArgs & { sessionId: string }
-      ): Promise<SessionHandle> {
-        return new ClaudeSessionHandle(
-          { ...args, resumeSessionId: args.sessionId },
-          args.model
-        );
+      async resumeSession(args: SessionCreateArgs & { sessionId: string }): Promise<SessionHandle> {
+        return new ClaudeSessionHandle({ ...args, resumeSessionId: args.sessionId }, args.model);
       },
     };
   }

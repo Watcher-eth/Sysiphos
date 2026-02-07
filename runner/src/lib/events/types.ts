@@ -6,16 +6,12 @@ export type AgentEventEnvelope = {
   programHash: string;
   principalId: string;
   agentName: string;
-
-  // correlation
   sessionId?: string;
 
-  // ordering
-  seq: number;
+  // ✅ producer seq
+  sourceSeq: number;
+
   ts: string;
-
-  event: AgentEvent;
-
-  // optional usage increments
+  event: any;
   usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
 };
