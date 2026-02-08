@@ -1,14 +1,21 @@
-// src/lib/runs/buildSpawnManifest.ts
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
 import { createHash, createHmac } from "node:crypto";
 
+export type ToolDefForModel = {
+  name: string;
+  description?: string;
+  input_schema?: any;
+};
+
 export type SpawnManifest = {
   runId: string;
   programHash: string;
-  program: { inlineText: string };
-  tools: string[];
-  capabilities: Array<{ capability: string; scope: string | null }>;
+  programText: string;
+
+  toolAllowlist: string[];
+  capabilities: string[];
+
   files: Array<{
     contentRef: string;
     path: string;
@@ -17,14 +24,21 @@ export type SpawnManifest = {
     mime: string | null;
     size: number | null;
   }>;
+
   env: Record<string, string>;
   limits: {
     wallClockMs: number;
     maxFileBytes: number;
     maxArtifactBytes: number;
   };
+
+  tools?: ToolDefForModel[];
+
+  mcpServers?: Record<string, any>;
+  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
+
   manifestHash: string;
-  manifestSig: string; // ✅ NEW
+  manifestSig: string;
 };
 
 function stableJson(value: any): string {
@@ -43,10 +57,53 @@ function hmacHex(secret: string, message: string) {
 }
 
 function mustSigningSecret() {
-  const s = process.env.RUNNER_SHARED_SECRET; // reuse shared secret for now
-  // (better: CONTROL_PLANE_MANIFEST_SECRET, but keeping it simple)
+  const s = process.env.RUNNER_SHARED_SECRET;
   if (!s) throw new Error("RUNNER_SHARED_SECRET missing (needed for manifest signing)");
   return s;
+}
+
+function canonicalBase(m: Omit<SpawnManifest, "manifestHash" | "manifestSig">) {
+  return {
+    runId: m.runId,
+    programHash: m.programHash,
+    programText: m.programText,
+    toolAllowlist: m.toolAllowlist,
+    capabilities: m.capabilities,
+    files: m.files,
+    env: m.env,
+    limits: m.limits,
+
+    tools: m.tools ?? null,
+
+    mcpServers: m.mcpServers ?? null,
+    permissionMode: m.permissionMode ?? null,
+  };
+}
+
+function asObj(v: any): Record<string, any> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  return v as any;
+}
+
+function asStrArr(v: any): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return v.map(String).filter(Boolean);
+}
+
+function asTools(v: any): ToolDefForModel[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: ToolDefForModel[] = [];
+  for (const t of v) {
+    if (!t || typeof t !== "object") continue;
+    const name = String((t as any).name ?? "").trim();
+    if (!name) continue;
+    out.push({
+      name,
+      description: typeof (t as any).description === "string" ? (t as any).description : "",
+      input_schema: (t as any).input_schema ?? { type: "object", properties: {}, additionalProperties: false },
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 export async function buildSpawnManifest(params: {
@@ -55,7 +112,18 @@ export async function buildSpawnManifest(params: {
 }): Promise<SpawnManifest> {
   const { runId, programHash } = params;
 
-  // 1) program text (authoritative)
+  // 0) pinned run execution spec
+  const runRow = await db
+    .select({
+      executionSpec: (schema.runs as any).executionSpec,
+    })
+    .from(schema.runs)
+    .where(eq(schema.runs.id, runId as any))
+    .limit(1);
+
+  const execSpec = (runRow[0]?.executionSpec ?? {}) as any;
+
+  // 1) program text
   const prog = await db
     .select({
       programText: schema.runPrograms.programText,
@@ -68,7 +136,7 @@ export async function buildSpawnManifest(params: {
   if (!prog[0]) throw new Error("run_program_missing");
   if (prog[0].programHash !== programHash) throw new Error("program_hash_mismatch");
 
-  // 2) permissions -> tools/capabilities
+  // 2) permissions
   const perms = await db
     .select({
       capability: schema.runPermissions.capability,
@@ -82,7 +150,11 @@ export async function buildSpawnManifest(params: {
     .map((p) => String(p.scope))
     .sort();
 
-    const capabilities = perms.map((p) => ({ capability: String(p.capability), scope: (p.scope ?? null) as string | null }));
+  const capabilities = perms
+    .filter((p) => p.capability && p.capability !== "tools.use")
+    .map((p) => String(p.capability))
+    .sort();
+
   // 3) files
   const files = await db
     .select({
@@ -107,33 +179,47 @@ export async function buildSpawnManifest(params: {
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
 
-  // 4) env + limits
-  const env: Record<string, string> = {};
+  // 4) env/limits + tools/mcp from execSpec
+  const env: Record<string, string> = { ...(asObj(execSpec.env) ?? {}) };
+
   const limits = {
-    wallClockMs: 60_000,
-    maxFileBytes: 50 * 1024 * 1024,
-    maxArtifactBytes: 50 * 1024 * 1024,
+    wallClockMs: Number(execSpec?.limits?.wallClockMs ?? 60_000),
+    maxFileBytes: Number(execSpec?.limits?.maxFileBytes ?? 50 * 1024 * 1024),
+    maxArtifactBytes: Number(execSpec?.limits?.maxArtifactBytes ?? 50 * 1024 * 1024),
   };
-  const base = {
+
+  const tools = asTools(execSpec.tools);
+  const mcpServers = asObj(execSpec.mcpServers);
+  const permissionMode =
+    typeof execSpec.permissionMode === "string" ? (execSpec.permissionMode as any) : undefined;
+
+  // ✅ tool search only via env
+  // if you previously used execSpec.enableToolSearch, migrate it here:
+  if (typeof execSpec.enableToolSearch === "string" && execSpec.enableToolSearch.trim()) {
+    env.ENABLE_TOOL_SEARCH = String(execSpec.enableToolSearch).trim();
+  }
+  const base: Omit<SpawnManifest, "manifestHash" | "manifestSig"> = {
     runId,
     programHash,
-    program: { inlineText: prog[0].programText },
-    tools: toolAllowlist,
+    programText: prog[0].programText,
+
+    toolAllowlist,
     capabilities,
+
     files: sortedFiles,
     env,
     limits,
+
+    tools,
+    mcpServers,
+    permissionMode,
   };
 
-  const canon = stableJson(base);
+  const canon = stableJson(canonicalBase(base));
   const manifestHash = sha256Hex(canon);
 
   const secret = mustSigningSecret();
-  const manifestSig = hmacHex(secret, canon);
+  const manifestSig = hmacHex(secret, manifestHash);
 
-  return {
-    ...base,
-    manifestHash,
-    manifestSig,
-  };
+  return { ...base, manifestHash, manifestSig };
 }

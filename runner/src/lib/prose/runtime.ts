@@ -2,13 +2,9 @@
 import type { ProseProgram, Stmt, Expr } from "./ast";
 import type { RuntimeState, BindingRef } from "./state";
 import { renderSessionPrompt } from "./prompts";
-import type { SessionAdapter, AgentEvent } from "./sessionAdapter";
+import type { SessionAdapter, AgentEvent, ToolDefForModel } from "./sessionAdapter";
 import { putText, getTextIfExists } from "../../s3";
 import { EventBuffer } from "../events/client";
-
-import { buildRegistry } from "../tools/catalog";
-import { ToolRunner } from "../tools/runner";
-import type { ToolCtx } from "../tools/types";
 
 type Manifest = {
   runId: string;
@@ -26,9 +22,78 @@ type Manifest = {
     sha256?: string | null;
   }>;
 
+  mcpServers?: Record<string, any>;
+  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
+
+  tools?: ToolDefForModel[]; // signed custom tools exposed to model
   env: Record<string, string>;
+
   limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+  manifestHash: string;
+  manifestSig: string;
 };
+
+function canonicalBaseForVerify(m: Manifest) {
+  return {
+    runId: m.runId,
+    programHash: m.programHash,
+    programText: m.programText,
+    toolAllowlist: m.toolAllowlist,
+    capabilities: m.capabilities,
+    files: m.files,
+    env: m.env,
+    limits: m.limits,
+
+    tools: m.tools ?? null,
+    mcpServers: m.mcpServers ?? null,
+    permissionMode: m.permissionMode ?? null,
+  };
+}
+
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+
+function stableJson(value: any): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => JSON.stringify(k) + ":" + stableJson(value[k])).join(",")}}`;
+}
+
+function sha256Hex(input: string) {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function hmacHex(secret: string, message: string) {
+  return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+function mustRunnerSharedSecret() {
+  const s = process.env.RUNNER_SHARED_SECRET;
+  if (!s) throw new Error("RUNNER_SHARED_SECRET missing");
+  return s;
+}
+
+
+function verifyManifestOrThrow(manifest: Manifest) {
+  const canon = stableJson(canonicalBaseForVerify(manifest));
+  const hash = sha256Hex(canon);
+
+  if (!manifest.manifestHash || !manifest.manifestSig) {
+    throw new Error("manifest_missing_sig");
+  }
+  if (hash !== manifest.manifestHash) {
+    throw new Error("manifest_hash_mismatch");
+  }
+
+  const secret = mustRunnerSharedSecret();
+  const expectedSig = hmacHex(secret, manifest.manifestHash);
+
+  const a = Buffer.from(expectedSig, "hex");
+  const b = Buffer.from(manifest.manifestSig, "hex");
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    throw new Error("manifest_sig_invalid");
+  }
+}
 
 type ExecResult = {
   outputs: BindingRef[];
@@ -71,6 +136,52 @@ function isTodoAdd(ev: any): ev is { type: "todo"; op: "add"; id?: string; text?
   return ev?.type === "todo" && ev?.op === "add";
 }
 
+function matchesMcpAllow(entry: string, toolName: string): boolean {
+  // entry like "mcp__server__tool" OR "mcp__server__*" OR "mcp__*__*"
+  const m = entry.match(/^mcp__(\*|[^_]+)__(\*|.+)$/);
+  if (!m) return false;
+
+  const [, serverPat, toolPat] = m;
+  const m2 = toolName.match(/^mcp__([^_]+)__(.+)$/);
+  if (!m2) return false;
+
+  const [, server, tool] = m2;
+  const serverOk = serverPat === "*" || serverPat === server;
+  const toolOk = toolPat === "*" || toolPat === tool;
+  return serverOk && toolOk;
+}
+
+function hasAnyMcpAllowance(allowListArr: string[]) {
+  return allowListArr.some((n) => typeof n === "string" && n.startsWith("mcp__"));
+}
+
+function deriveSessionConfig(manifest: Manifest) {
+  const allowArr = (manifest.toolAllowlist ?? []).filter((x) => typeof x === "string" && x.length);
+  const allow = new Set<string>(allowArr);
+
+  const mcpAllowedTools = allowArr.filter((n) => n.startsWith("mcp__"));
+  const hasMcpAllowance = mcpAllowedTools.length > 0;
+
+  // MCP only enabled if (a) servers exist and (b) allowlist contains at least one mcp__ entry
+  const mcpServers = manifest.mcpServers && hasMcpAllowance ? manifest.mcpServers : undefined;
+
+  // Claude SDK expects "allowedTools" patterns for MCP gating
+  const allowedTools = hasMcpAllowance ? mcpAllowedTools : undefined;
+
+  // ✅ env is the only place ENABLE_TOOL_SEARCH lives
+  const env: Record<string, string> = { ...(manifest.env ?? {}) };
+
+  return {
+    allowArr,
+    allow,
+    mcpServers,
+    allowedTools,
+    permissionMode: manifest.permissionMode ?? "default",
+    env,
+    tools: (manifest.tools ?? []) as ToolDefForModel[],
+  };
+}
+
 function artifactKey(ev: any): string | null {
   if (!ev || typeof ev !== "object") return null;
   const contentRef = typeof ev.contentRef === "string" && ev.contentRef ? ev.contentRef : "";
@@ -98,6 +209,8 @@ export async function executeProse(args: {
 }): Promise<ExecResult> {
   const startedAt = Date.now();
   const { manifest, program, adapter } = args;
+  verifyManifestOrThrow(manifest);
+
 
   const principalId = (manifest.principalId?.trim() || "system").slice(0, 128);
 
@@ -123,33 +236,6 @@ export async function executeProse(args: {
 
   const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
 
-  const registry = buildRegistry();
-
-  const toolRunner = new ToolRunner(registry, (ev: any) => {
-    if (ev?.type === "step" && ev?.op === "start") {
-      eventBuf.enqueue(
-        { type: "step", status: "started", name: String(ev.name ?? ev.toolName ?? "tool"), detail: String(ev.detail ?? "") } as any,
-        undefined,
-        { agentName: "system" }
-      );
-      return;
-    }
-    if (ev?.type === "step" && ev?.op === "finish") {
-      eventBuf.enqueue(
-        {
-          type: "step",
-          status: ev.ok ? "completed" : "failed",
-          name: String(ev.name ?? ev.toolName ?? "tool"),
-          detail: String(ev.detail ?? ""),
-          data: ev.error ? { error: ev.error } : undefined,
-        } as any,
-        undefined,
-        { agentName: "system" }
-      );
-      return;
-    }
-    eventBuf.enqueue(ev as any, undefined, { agentName: "system" });
-  });
 
   async function writeBinding(binding: BindingRef, contentText: string) {
     const key = s3BindingKey(st.runId, binding.name);
@@ -189,6 +275,8 @@ export async function executeProse(args: {
     return {};
   }
 
+  
+
   async function runSession(args2: { title: string; agentName?: string; isResume: boolean }): Promise<string> {
     const agentName = args2.agentName ?? "default";
     const agent = args2.agentName ? program.agents[args2.agentName] : undefined;
@@ -210,49 +298,40 @@ export async function executeProse(args: {
       eventBuf.enqueue(event, usage, { agentName, sessionId });
     };
 
-    const toolAllowlist = new Set<string>(manifest.toolAllowlist ?? []);
-    const capabilities = new Set<string>(manifest.capabilities ?? []);
 
-    const allowedDomains = new Set<string>();
-    if (capabilities.has("net.egress") && (manifest.env?.NET_ALLOW_ALL === "1" || process.env.NET_ALLOW_ALL === "1")) {
-      allowedDomains.add("*");
-    }
-
-    const toolCtx: ToolCtx = {
-      runId: st.runId,
-      programHash: st.programHash,
-      principalId,
-      agentName,
-      sessionId: priorSessionId ?? undefined,
-      workspaceDir,
-
-      toolAllowlist,
-      capabilities,
-
-      filePolicy: {
-        allowed: manifest.files?.map((f) => ({ path: f.path, mode: f.mode })) ?? [],
-        maxFileBytes: manifest.limits?.maxFileBytes ?? 50 * 1024 * 1024,
-      },
-
-      netPolicy: { allowedDomains },
-
-      controlPlaneBaseUrl:
-        process.env.CONTROL_PLANE_BASE_URL ||
-        manifest.env?.CONTROL_PLANE_BASE_URL ||
-        undefined,
-
-      runnerSharedSecret:
-        process.env.RUNNER_SHARED_SECRET ||
-        manifest.env?.RUNNER_SHARED_SECRET ||
-        undefined,
-    };
+    const cfg = deriveSessionConfig(manifest);
 
     const toolHandler = async (call: { name: string; input: unknown; toolUseId?: string }) => {
-      const r = await toolRunner.run(toolCtx, { name: call.name, input: call.input, toolUseId: call.toolUseId });
-      if ((r as any)?.ok) return { ok: true as const, output: (r as any).output };
-      return { ok: false as const, error: (r as any).error ?? { code: "tool_failed", message: "tool_failed" } };
+      const name = String(call?.name ?? "");
+    
+      // ✅ MCP tools should be executed inside provider SDK, never routed here.
+      if (name.startsWith("mcp__")) {
+        return {
+          ok: false as const,
+          error: {
+            code: "tool_bug",
+            message: `Unexpected MCP tool routed to runner toolHandler: ${name}`,
+            data: { tool: name },
+          },
+        };
+      }
+    
+      // ✅ single source of truth: toolAllowlist
+      if (!name || !cfg.allow.has(name)) {
+        return {
+          ok: false as const,
+          error: { code: "tool_denied", message: `Tool not permitted: ${name}`, data: { tool: name } },
+        };
+      }
+    
+      // If you want runner-enforced execution, implement it here.
+      // Otherwise deny unimplemented local tools.
+      return {
+        ok: false as const,
+        error: { code: "tool_unimplemented", message: `No runner handler for tool: ${name}` },
+      };
     };
-
+    
     const contextRefs = Array.from(st.bindings.values()).map((b) => ({ name: b.name, contentRef: b.contentRef }));
 
     const promptParts = renderSessionPrompt({
@@ -262,35 +341,34 @@ export async function executeProse(args: {
       examples: undefined,
     });
 
-    const tools = toolRunner.getClaudeToolDefs(toolCtx);
-
+    const sessionArgsBase = {
+      model: agent?.model,
+      system: promptParts.system,
+      memoryText: wantsResume ? memoryText ?? null : null,
+      idempotencyKey: wantsResume
+        ? `${st.runId}:${agentKey}:resume`
+        : `${st.runId}:${agentKey}:create`,
+      principalId,
+      agentName,
+      runId: st.runId,
+      workspaceDir,
+      toolHandler,
+      tools: cfg.tools,         // signed custom tools
+      _effectiveAllow: cfg.allowArr,
+    
+      // ✅ MCP passthrough (derived from allowlist)
+      mcpServers: cfg.mcpServers,
+      allowedTools: cfg.allowedTools,
+      permissionMode: cfg.permissionMode,
+    
+      // ✅ env is the only place tool-search lives
+      env: cfg.env,
+    };
+    
     const session =
       wantsResume && priorSessionId
-        ? await adapter.resumeSession({
-            sessionId: priorSessionId,
-            model: agent?.model,
-            system: promptParts.system,
-            memoryText,
-            idempotencyKey: `${st.runId}:${agentKey}:resume`,
-            principalId,
-            agentName,
-            runId: st.runId,
-            workspaceDir,
-            toolHandler,
-            tools,
-          })
-        : await adapter.createSession({
-            model: agent?.model,
-            system: promptParts.system,
-            memoryText: wantsResume ? memoryText ?? null : null,
-            idempotencyKey: `${st.runId}:${agentKey}:create`,
-            principalId,
-            agentName,
-            runId: st.runId,
-            workspaceDir,
-            toolHandler,
-            tools,
-          });
+        ? await adapter.resumeSession({ ...sessionArgsBase, sessionId: priorSessionId } as any)
+        : await adapter.createSession(sessionArgsBase as any);
 
     await session.send(promptParts.user);
 

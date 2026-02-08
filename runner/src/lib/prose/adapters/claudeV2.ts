@@ -13,6 +13,17 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { EventBuffer } from "../../events/buffer";
 
+const NATIVE_TOOLS: any[] = [
+  { type: "bash_20250124", name: "bash" },
+  { type: "text_editor_20250728", name: "str_replace_based_edit_tool" },
+  // If you want computer-use always enabled:
+  // { type: "computer_20251124", name: "computer", display_width_px: 1024, display_height_px: 768, display_number: 1 },
+
+  // If you have web fetch/search tools, include them similarly:
+  { type: "web_fetch_20250910", name: "web_fetch", max_uses: 5 },
+  { type: "web_search_20250305", name: "web_search", max_uses: 5 },
+];
+
 function sha256Hex(buf: Buffer) {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -237,8 +248,20 @@ function ingestEventTextChunk(args: { chunk: string; carry: string; emit: (ev: A
 
 function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
   const out: SessionTurnResult[] = [];
-
   const sid = msg?.session_id ?? msg?.sessionId ?? msg?.data?.session_id ?? msg?.data?.sessionId;
+
+  if (msg?.type === "system" && msg?.subtype === "init") {
+    out.push({
+      sessionId: sid,
+      event: {
+        type: "log",
+        level: "info",
+        message: "mcp_init",
+        data: { mcp_servers: msg?.mcp_servers ?? msg?.data?.mcp_servers ?? null },
+      } as any,
+    });
+    return out;
+  }
 
   if (msg?.type === "assistant") {
     const text =
@@ -247,6 +270,16 @@ function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
       "";
 
     if (text) out.push({ sessionId: sid, text });
+    if (Array.isArray(msg?.content)) {
+      for (const block of msg.content) {
+        if (block?.type === "tool_use" && typeof block?.name === "string" && block.name.startsWith("mcp__")) {
+          out.push({
+            sessionId: sid,
+            event: { type: "log", level: "info", message: "mcp_tool_use", data: { name: block.name } } as any,
+          });
+        }
+      }
+    }
 
     const usage = msg?.usage
       ? {
@@ -265,6 +298,16 @@ function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
   }
 
   return out;
+}
+
+function filterByAllowlist(tools: any[], allow?: string[]) {
+  const entries = (allow ?? []).filter(Boolean);
+
+  if (entries.includes("*")) return tools;
+
+  const s = new Set(entries);
+  if (!s.size) return [];
+  return tools.filter((t) => t?.name && s.has(t.name));
 }
 
 type HookCallback = (input: any, toolUseID: string | null, ctx: { signal: AbortSignal }) => Promise<any>;
@@ -480,12 +523,20 @@ function emitStructuredOutput(args: { structured: any; push: (t: SessionTurnResu
   }
 }
 
+type PromptMsg =
+  | { type: "user"; message: { role: "user"; content: string } }
+  | { type: "assistant"; message: { role: "assistant"; content: string } };
+
+async function* promptStreamFromText(text: string): AsyncGenerator<PromptMsg> {
+  yield { type: "user", message: { role: "user", content: text } };
+}
+
 class ClaudeSessionHandle implements SessionHandle {
   private iter: AsyncGenerator<SessionTurnResult> | null = null;
   private userText: string | null = null;
 
   constructor(
-    private readonly args: SessionCreateArgs & { resumeSessionId?: string },
+    private readonly args: SessionCreateArgs & { resumeSessionId?: string; enableToolSearch?: string },
     private readonly model?: string
   ) {}
 
@@ -509,25 +560,24 @@ class ClaudeSessionHandle implements SessionHandle {
       const workspaceDir = self.args.workspaceDir ?? process.cwd();
 
       const eventBuffer =
-      self.args.programHash && self.args.principalId
-        ? new EventBuffer(
-            {
-              v: 1, // ✅ required by AgentEventEnvelope
-              runId,
-              programHash: self.args.programHash,
-              principalId: self.args.principalId,
-              agentName: self.args.agentName!, // or undefined-safe if you prefer
-              sessionId: undefined,
-            },
-            self.args.eventBufferOptions
-          )
-        : null;
+        self.args.programHash && self.args.principalId
+          ? new EventBuffer(
+              {
+                v: 1,
+                runId,
+                programHash: self.args.programHash,
+                principalId: self.args.principalId,
+                agentName: self.args.agentName!,
+                sessionId: undefined,
+              },
+              self.args.eventBufferOptions
+            )
+          : null;
       eventBuffer?.start();
 
       const push = (t: SessionTurnResult) => {
         queue.push(t);
 
-        // 2.4/2.5: stream events to control plane (buffered + signed)
         if (eventBuffer && (t.event || t.usage)) {
           eventBuffer.enqueue(
             t.event ?? undefined,
@@ -536,7 +586,8 @@ class ClaudeSessionHandle implements SessionHandle {
               agentName: self.args.agentName ?? undefined,
               sessionId: t.sessionId ?? lastSessionId ?? undefined,
             }
-          );        }
+          );
+        }
       };
 
       const files = new WorkspaceFiles({
@@ -546,7 +597,6 @@ class ClaudeSessionHandle implements SessionHandle {
         agentName: self.args.agentName,
         emit: (ev) => push({ event: ev, sessionId: lastSessionId }),
         versioning: true,
-        allowlist: self.args.workspaceAllowlist ?? undefined,
         maxFileBytes: self.args.maxFileBytes ?? null,
         maxWorkspaceBytes: self.args.maxWorkspaceBytes ?? null,
       });
@@ -557,13 +607,13 @@ class ClaudeSessionHandle implements SessionHandle {
       const prompt = self.userText ?? "";
 
       const toolHandler = self.args.toolHandler;
-      const tools = self.args.tools ?? [];
+      const allow = self.args._effectiveAllow ?? [];
 
-      const sdkTools = tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        input_schema: t.input_schema ?? { type: "object", properties: {}, additionalProperties: true },
-      }));
+      const customTools = (self.args.tools ?? []).map((t: any) =>
+        t?.type ? t : { name: t.name, description: t.description ?? "", input_schema: t.input_schema ?? { type: "object", properties: {} } }
+      );
+      
+      const sdkTools = filterByAllowlist([...NATIVE_TOOLS, ...customTools], allow);
 
       const options: any = {
         model: self.model ?? self.args.model,
@@ -571,25 +621,34 @@ class ClaudeSessionHandle implements SessionHandle {
         ...(self.args.system ? { system: self.args.system } : {}),
         hooks,
         outputFormat: { type: "json_schema", schema: RUN_OUTPUT_SCHEMA },
-        ...(sdkTools.length ? { tools: sdkTools } : {}),
+        tools: sdkTools,
+      
+        // ✅ MCP passthrough (already derived in runtime)
+        ...(self.args.mcpServers ? { mcpServers: self.args.mcpServers } : {}),
+        ...(self.args.allowedTools ? { allowedTools: self.args.allowedTools } : {}),
+        ...(self.args.permissionMode ? { permissionMode: self.args.permissionMode } : {}),
+      
+        // ✅ env passed once; includes ENABLE_TOOL_SEARCH if you want it
+        ...(self.args.env ? { env: self.args.env } : {}),
+      
         ...(toolHandler
           ? {
               toolHandler: async (call: any) => {
                 const name = call?.name ?? call?.tool_name ?? call?.toolName;
                 const input = call?.input ?? call?.tool_input ?? call?.toolInput ?? {};
                 const toolUseId = call?.tool_use_id ?? call?.toolUseId ?? call?.id ?? undefined;
-
+      
                 const r = await toolHandler({ name, input, toolUseId });
                 if ((r as any)?.ok) return (r as any).output;
-
+      
                 const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
                 throw Object.assign(new Error(err.message ?? "tool_failed"), { code: err.code, data: err.data });
               },
             }
           : {}),
       };
-
-      const resp = query({ prompt, options });
+      
+      const resp = query({ prompt: promptStreamFromText(prompt), options });
 
       let carry = "";
       let announced = false;
@@ -601,43 +660,6 @@ class ClaudeSessionHandle implements SessionHandle {
       try {
         for await (const msg of resp as AsyncIterable<any>) {
           while (queue.length) yield queue.shift()!;
-
-          if (toolHandler && (msg?.type === "tool_use" || msg?.type === "tool_use_request")) {
-            const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;
-            if (sid) lastSessionId = sid;
-
-            const toolUseId = msg?.tool_use_id ?? msg?.toolUseId ?? msg?.id ?? undefined;
-            const name = msg?.name ?? msg?.tool_name ?? msg?.toolName;
-            const input = msg?.input ?? msg?.tool_input ?? msg?.toolInput ?? {};
-
-            const r = await toolHandler({ name, input, toolUseId });
-
-            if ((r as any)?.ok) {
-              const output = (r as any).output;
-
-              if (typeof (resp as any)?.sendToolResult === "function") {
-                await (resp as any).sendToolResult({ tool_use_id: toolUseId, output });
-              } else if (typeof (resp as any)?.toolResult === "function") {
-                await (resp as any).toolResult(toolUseId, output);
-              } else {
-                push({
-                  sessionId: lastSessionId,
-                  event: { type: "raw", provider: "claude", payload: { tool_result: { toolUseId, output } } } as any,
-                });
-              }
-            } else {
-              const err = (r as any)?.error ?? { code: "tool_failed", message: "tool_failed" };
-              if (typeof (resp as any)?.sendToolResult === "function") {
-                await (resp as any).sendToolResult({
-                  tool_use_id: toolUseId,
-                  error: { code: err.code, message: err.message, data: err.data },
-                });
-              }
-              push({ sessionId: lastSessionId, event: { type: "log", level: "error", message: "tool_failed", data: err } as any });
-            }
-
-            continue;
-          }
 
           if (msg?.type === "result") {
             const sid = msg?.session_id ?? msg?.sessionId ?? lastSessionId;

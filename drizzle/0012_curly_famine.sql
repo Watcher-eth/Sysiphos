@@ -1,0 +1,1 @@
+ALTER TABLE "run_programs" ADD COLUMN "compiler_inputs_json" text DEFAULT '' NOT NULL;

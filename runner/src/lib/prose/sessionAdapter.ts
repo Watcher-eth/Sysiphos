@@ -85,11 +85,20 @@ export type ToolHandler = (call: {
   | { ok: false; error: { code: string; message: string; data?: any } }
 >;
 
-export type ClaudeToolDef = {
-  name: string;
-  description?: string;
-  input_schema?: any; // Anthropic tools input schema
-};
+// ✅ supports either "custom tool def" OR "native tool def" passthrough
+export type ToolDefForModel =
+  | {
+      // custom tools
+      name: string;
+      description?: string;
+      input_schema?: any; // json schema derived from zod
+    }
+  | {
+      // native tools (Agent SDK / Anthropic tools), passed through as-is
+      type: string;
+      name: string;
+      [k: string]: any;
+    };
 
 export type SessionCreateArgs = {
   model?: string;
@@ -99,28 +108,37 @@ export type SessionCreateArgs = {
   sessionId?: string | null;
   idempotencyKey?: string | null;
 
-  // ✅ routing/debugging + scoping
   principalId?: string;
   agentName?: string;
 
-  // ✅ run/workspace context for file ops + events
   runId?: string;
   workspaceDir?: string;
 
-  // ✅ Phase 2.4/2.5: control plane streaming
+  // ✅ workspace file guardrails
+  workspaceAllowlist?: string[];
+  maxFileBytes?: number;
+  maxWorkspaceBytes?: number;
+
+  // ✅ event buffer / signing context
   programHash?: string;
   eventBufferOptions?: EventBufferOptions;
 
-  // ✅ workspace safety controls for WorkspaceFiles
-  workspaceAllowlist?: Array<{ path: string; mode: "ro" | "rw" }>;
-  maxFileBytes?: number | null;
-  maxWorkspaceBytes?: number | null;
-
-  // ✅ Phase 1: tool calling
+  // ✅ tool calling
   toolHandler?: ToolHandler;
 
   // ✅ tools exposed to model (name/description/schema)
-  tools?: ClaudeToolDef[];
+  tools?: ToolDefForModel[];
+
+  // ✅ MCP + permissions (new spec)
+  mcpServers?: Record<string, any>;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
+
+  // ✅ SDK env passthrough (ENABLE_TOOL_SEARCH etc)
+  env?: Record<string, string>;
+  _effectiveAllow?: string[];
+
 };
 
 export function makeMockAdapter(): SessionAdapter {

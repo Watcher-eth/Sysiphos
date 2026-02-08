@@ -122,39 +122,19 @@ Bun.serve({
 
         // If caller overrides allowlist/files, require they also pass programText (otherwise you can't execute).
         const hasOverrides = Boolean(body.toolAllowlist || body.files || body.programText);
+        if (hasOverrides) throw new HttpError(400, "Overrides disabled; use materialized manifest");
 
-        const fetched = hasOverrides
-          ? undefined
-          : await fetchMaterializeManifest(runId, programHash).catch(() => undefined);
+const fetched = await fetchMaterializeManifest(runId, programHash);
+if (!fetched?.manifestHash || !fetched?.manifestSig) throw new HttpError(500, "materialize_missing_sig");
 
         const programText = body.programText ?? fetched?.programText ?? "";
         if (!programText) throw new HttpError(400, "Missing programText");
 
         const manifest = {
-          runId,
-          programHash,
-          principalId, // ✅ new
-
-          programText,
-
-          toolAllowlist: body.toolAllowlist ?? fetched?.toolAllowlist ?? [],
-          capabilities: fetched?.capabilities ?? [],
-          files: (body.files ?? fetched?.files ?? []).map((f) => ({
-            contentRef: f.contentRef,
-            path: f.path,
-            mode: (f.mode ?? "ro") as "ro" | "rw",
-            sha256: f.sha256 ?? null,
-            mime: f.mime ?? null,
-            size: f.size ?? null,
-          })),
-          env: fetched?.env ?? {},
-          limits:
-            fetched?.limits ?? {
-              wallClockMs: 60_000,
-              maxFileBytes: 25_000_000,
-              maxArtifactBytes: 5_000_000,
-            },
-        };
+            ...fetched,
+            principalId, // not signed; ok
+          };
+          
 
         const sessionId = `sess_${crypto.randomUUID()}`;
 

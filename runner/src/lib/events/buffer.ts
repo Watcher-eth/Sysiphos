@@ -111,22 +111,24 @@ export async function postEvents(args: PostEventsArgs): Promise<void> {
     }
   
     enqueue(
-      event: AgentEventEnvelope["event"],
-      usage?: AgentEventEnvelope["usage"],
-      override?: Partial<Pick<AgentEventEnvelope, "agentName" | "sessionId">>
-    ) {
-      const envlp: AgentEventEnvelope = {
-        ...this.base,
-        ...(override ?? {}),
-        seq: ++this.seq,
-        ts: new Date().toISOString(),
-        event,
-        usage,
-      };
-  
-      this.q.push(envlp);
-      if (this.q.length > this.opts.maxQueue) this.q.splice(0, this.q.length - this.opts.maxQueue);
-    }
+        event?: AgentEventEnvelope["event"],
+        usage?: AgentEventEnvelope["usage"],
+        override?: Partial<Pick<AgentEventEnvelope, "agentName" | "sessionId">>
+      ) {
+        if (event === undefined && usage === undefined) return;
+      
+        const envlp: AgentEventEnvelope = {
+          ...this.base,
+          ...(override ?? {}),
+          seq: ++this.seq,
+          ts: new Date().toISOString(),
+          event,
+          usage,
+        };
+      
+        this.q.push(envlp);
+        if (this.q.length > this.opts.maxQueue) this.q.splice(0, this.q.length - this.opts.maxQueue);
+      }
   
     async flush() {
     if (!env.controlPlaneBaseUrl) return;

@@ -5,32 +5,58 @@ import { dirname, join } from "node:path";
 import { downloadToFile } from "./s3";
 import { createHash, createHmac } from "node:crypto";
 
-type Manifest = {
-  runId: string;
-  programHash: string;
-
-  // ✅ 4B.4: control plane returns programText (string), not {inlineText}
-  programText: string;
-
-  // ✅ keep naming aligned with control plane response
-  toolAllowlist: string[];
-  capabilities: string[];
-  files: Array<{
-    contentRef: string;
-    path: string;
-    mode: "ro" | "rw";
-    sha256: string | null;
-    mime: string | null;
-    size: number | null;
-  }>;
-  env: Record<string, string>;
-  limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
-
-  // integrity
-  manifestHash: string;
-  manifestSig: string;
+type ToolDefForModel = {
+  name: string;
+  description?: string;
+  input_schema?: any;
 };
 
+type Manifest = {
+    runId: string;
+    programHash: string;
+    programText: string;
+  
+    toolAllowlist: string[];
+    capabilities: string[];
+  
+    files: Array<{
+      contentRef: string;
+      path: string;
+      mode: "ro" | "rw";
+      sha256: string | null;
+      mime: string | null;
+      size: number | null;
+    }>;
+  
+    env: Record<string, string>;
+    limits: { wallClockMs: number; maxFileBytes: number; maxArtifactBytes: number };
+  
+    tools?: ToolDefForModel[];
+  
+    mcpServers?: Record<string, any>;
+    permissionMode?: string;
+  
+    manifestHash: string;
+    manifestSig: string;
+  };
+
+  function canonicalBase(m: Manifest) {
+    return {
+      runId: m.runId,
+      programHash: m.programHash,
+      programText: m.programText,
+      toolAllowlist: m.toolAllowlist,
+      capabilities: m.capabilities,
+      files: m.files,
+      env: m.env,
+      limits: m.limits,
+  
+      tools: m.tools ?? null,
+  
+      mcpServers: m.mcpServers ?? null,
+      permissionMode: m.permissionMode ?? null,
+    };
+  }
 function stableJson(value: any): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -44,19 +70,6 @@ function sha256Hex(input: string) {
 
 function hmacHex(secret: string, message: string) {
   return createHmac("sha256", secret).update(message).digest("hex");
-}
-
-function canonicalBase(m: Manifest) {
-  return {
-    runId: m.runId,
-    programHash: m.programHash,
-    programText: m.programText,
-    toolAllowlist: m.toolAllowlist,
-    capabilities: m.capabilities,
-    files: m.files,
-    env: m.env,
-    limits: m.limits,
-  };
 }
 
 async function fetchManifest(runId: string, programHash: string): Promise<Manifest> {

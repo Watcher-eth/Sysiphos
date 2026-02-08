@@ -111,7 +111,7 @@ export const accounts = pgTable(
   
       title: text("title").notNull(),
       description: text("description").notNull().default(""),
-  
+      executionSpec: jsonb("execution_spec").notNull().default({}),
       // deliverables: documents / spreadsheets / emails (created/edited)
       // store the request-side spec; actual produced artifacts attach to runs
       deliverablesSpec: jsonb("deliverables_spec").notNull().default([]),
@@ -197,7 +197,7 @@ export const runs = pgTable(
       status: text("status").notNull().$type<RunStatus>().default("queued"),
       title: text("title").notNull(),
       description: text("description").notNull().default(""),
-  
+      executionSpec: jsonb("execution_spec").notNull().default({}),
       temporalWorkflowId: text("temporal_workflow_id"),
       temporalRunId: text("temporal_run_id"),
   
@@ -227,11 +227,14 @@ export const runs = pgTable(
       .references(() => runs.id, { onDelete: "cascade" }),
   
     compilerVersion: text("compiler_version").notNull(),
-    sourceHash: text("source_hash").notNull(), // hash of compiler inputs (task/workflow snapshot + inputs)
+    sourceHash: text("source_hash").notNull(),
   
     programText: text("program_text").notNull(),
     programSource: text("program_source").notNull().default("generated"),
     programHash: text("program_hash").notNull(),
+  
+    // ✅ NEW: store exact canonical compiler inputs for reproducibility
+    compilerInputsJson: text("compiler_inputs_json").notNull().default(""),
   
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   });
