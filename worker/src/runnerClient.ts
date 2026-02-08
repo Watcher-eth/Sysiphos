@@ -3,6 +3,10 @@ export type RunnerUsage = {
   wallClockMs: number;
   tokensIn?: number;
   tokensOut?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  totalCostUsd?: number;
+  modelUsage?: Record<string, any>;
   costCredits?: number;
 };
 

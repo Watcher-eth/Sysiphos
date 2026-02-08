@@ -33,9 +33,12 @@ async function workspaceBalanceForUpdate(tx: any, workspaceId: string): Promise<
         ELSE 0
       END
     ), 0) AS balance
-    FROM credit_ledger
-    WHERE workspace_id = ${workspaceId}::uuid
-    FOR UPDATE
+    FROM (
+      SELECT kind, amount
+      FROM credit_ledger
+      WHERE workspace_id = ${workspaceId}::uuid
+      FOR UPDATE
+    ) AS locked_rows
   `);
   return Number((rows as any)?.rows?.[0]?.balance ?? 0);
 }
@@ -107,11 +110,14 @@ export async function settleRunHold(params: {
     // Lock run-scoped ledger rows so settle is idempotent under retries.
     const heldRows = await tx.execute(sql`
       SELECT COALESCE(SUM(amount), 0) AS held
-      FROM credit_ledger
-      WHERE workspace_id = ${workspaceId}::uuid
-        AND run_id = ${runId}::uuid
-        AND kind = 'hold'
-      FOR UPDATE
+      FROM (
+        SELECT amount
+        FROM credit_ledger
+        WHERE workspace_id = ${workspaceId}::uuid
+          AND run_id = ${runId}::uuid
+          AND kind = 'hold'
+        FOR UPDATE
+      ) AS locked_rows
     `);
     const held = Number((heldRows as any)?.rows?.[0]?.held ?? 0);
 

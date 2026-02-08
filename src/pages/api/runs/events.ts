@@ -1,7 +1,7 @@
 // src/pages/api/runs/events.ts
 import type { NextApiRequest, NextApiResponse } from "next";
-import { createHmac } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { createHash, createHmac } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
 import { runEventsHub } from "@/lib/runs/eventHub";
 
@@ -21,6 +21,72 @@ function safeEqual(a: string, b: string) {
   let out = 0;
   for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return out === 0;
+}
+
+function sha256Hex(input: string) {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+const VALID_ARTIFACT_TYPES = new Set(["document", "spreadsheet", "email", "file", "patch", "log"]);
+const VALID_FILE_OPS = new Set([
+  "opened",
+  "read",
+  "created",
+  "edited",
+  "deleted",
+  "moved",
+  "copied",
+  "mkdir",
+  "rmdir",
+]);
+
+type DeliverableSpec = {
+  id?: string;
+  type?: string;
+  label?: string;
+  title?: string;
+  name?: string;
+};
+
+function normalizeDeliverablesSpec(input: any): DeliverableSpec[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((d) => (d && typeof d === "object" ? (d as DeliverableSpec) : null))
+    .filter(Boolean)
+    .map((d) => ({
+      id: d?.id ? String(d.id) : undefined,
+      type: d?.type ? String(d.type) : undefined,
+      label: d?.label ? String(d.label) : d?.title ? String(d.title) : d?.name ? String(d.name) : undefined,
+    }));
+}
+
+function mapDeliverableTypeToArtifactType(t?: string) {
+  const type = (t ?? "").toLowerCase();
+  if (type === "doc" || type === "document") return "document";
+  if (type === "sheet" || type === "spreadsheet" || type === "csv" || type === "excel") return "spreadsheet";
+  if (type === "email") return "email";
+  if (type === "edit" || type === "patch") return "patch";
+  if (type === "file") return "file";
+  return type || null;
+}
+
+function matchDeliverable(args: {
+  deliverables: DeliverableSpec[];
+  artifactType: string;
+  artifactTitle: string;
+  deliverableId?: string | null;
+}): DeliverableSpec | null {
+  const { deliverables, artifactType, artifactTitle, deliverableId } = args;
+  if (!deliverables.length) return null;
+  if (deliverableId) {
+    const byId = deliverables.find((d) => d.id === deliverableId);
+    if (byId) return byId;
+  }
+  const title = artifactTitle.trim().toLowerCase();
+  const byLabel = deliverables.find((d) => (d.label ?? "").trim().toLowerCase() === title);
+  if (byLabel) return byLabel;
+  const byType = deliverables.find((d) => mapDeliverableTypeToArtifactType(d.type) === artifactType);
+  return byType ?? null;
 }
 
 function mustRunnerSecret() {
@@ -183,12 +249,23 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!safeEqual(sig, expected)) return res.status(401).send("Invalid signature");
 
   const runExists = await db
-    .select({ id: schema.runs.id })
+    .select({ id: schema.runs.id, taskId: schema.runs.taskId })
     .from(schema.runs)
     .where(eq(schema.runs.id, body.runId as any))
     .limit(1);
 
   if (!runExists[0]) return res.status(404).send("Run not found");
+  const taskId = runExists[0].taskId ? String(runExists[0].taskId) : null;
+
+  let deliverablesSpec: DeliverableSpec[] = [];
+  if (taskId) {
+    const taskRow = await db
+      .select({ deliverablesSpec: schema.tasks.deliverablesSpec })
+      .from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId as any))
+      .limit(1);
+    deliverablesSpec = normalizeDeliverablesSpec(taskRow[0]?.deliverablesSpec ?? []);
+  }
 
   const source = (body.source ?? "runner").slice(0, 64);
 
@@ -197,7 +274,55 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     let seq = start;
 
-    const rows = body.events.map((e) => {
+    const todoRows: Array<{
+      runId: any;
+      externalId: string;
+      text: string;
+      description: string;
+      status: string;
+      order: number;
+      createdAt: Date;
+      updatedAt: Date;
+    }> = [];
+    const todoDeletes: Array<{ runId: any; externalId: string }> = [];
+
+    const artifactRows: Array<{
+      runId: any;
+      type: any;
+      title: string;
+      deliverableKey: string | null;
+      contentRef: string | null;
+      sha256: string | null;
+      mime: string | null;
+      size: number | null;
+      createdBy: string;
+      createdAt: Date;
+    }> = [];
+
+    const fileOpRows: Array<{
+      runId: any;
+      op: any;
+      path: string;
+      beforeContentRef: string | null;
+      afterContentRef: string | null;
+      checkpointId: string | null;
+      toolName: string | null;
+      toolUseId: string | null;
+      createdAt: Date;
+      payload: any;
+    }> = [];
+
+    const checkpointRows: Array<{
+      runId: any;
+      provider: string;
+      providerCheckpointId: string;
+      status: "created" | "restored" | "dropped";
+      createdAt: Date;
+      payload: any;
+    }> = [];
+
+    const rows: Array<any> = [];
+    for (const e of body.events) {
       const event = e?.event ?? { type: "log", level: "warn", message: "missing_event" };
       const classified = classifyEvent(event);
 
@@ -209,7 +334,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         event,
       };
 
-      return {
+      rows.push({
         runId: body.runId as any,
         seq: seq++,
         source,
@@ -231,8 +356,55 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
         payload,
         createdAt: new Date(e.ts),
-      };
-    });
+      });
+
+      if (event?.type === "artifact" && deliverablesSpec.length) {
+        const data = (event as any).data && typeof (event as any).data === "object" ? (event as any).data : {};
+        const rawType = String((event as any).artifactType ?? data.type ?? data.artifactType ?? "");
+        const type = VALID_ARTIFACT_TYPES.has(rawType) ? rawType : "file";
+        const title = String((event as any).title ?? data.title ?? "Artifact");
+        const deliverableId = String((event as any).deliverableId ?? data.deliverableId ?? "").trim() || null;
+        const matched = matchDeliverable({
+          deliverables: deliverablesSpec,
+          artifactType: type,
+          artifactTitle: title,
+          deliverableId,
+        });
+
+        if (!matched) {
+          rows.push({
+            runId: body.runId as any,
+            seq: seq++,
+            source,
+            sourceSeq: Number(e.sourceSeq ?? 0),
+            type: "LOG",
+            agentName: normStr(e.agentName) ?? normStr(body.principalId) ?? "system",
+            sessionId: normStr(e.sessionId) ?? null,
+            action: "artifact_validation_failed",
+            level: "warn",
+            todoId: null,
+            stepId: null,
+            artifactId: null,
+            filePath: null,
+            checkpointId: null,
+            payload: {
+              event: {
+                type: "log",
+                level: "warn",
+                message: "artifact_validation_failed",
+                data: {
+                  artifactType: type,
+                  artifactTitle: title,
+                  deliverableId,
+                  deliverablesSpec,
+                },
+              },
+            },
+            createdAt: new Date(e.ts),
+          });
+        }
+      }
+    }
 
     const out = await tx
       .insert(schema.runEvents)
@@ -247,6 +419,197 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         payload: schema.runEvents.payload,
         createdAt: schema.runEvents.createdAt,
       });
+
+    for (const e of body.events) {
+      const event = e?.event ?? null;
+      if (!event || typeof event !== "object") continue;
+      const ts = new Date(e.ts ?? Date.now());
+
+      if (event.type === "todo") {
+        const op = String((event as any).op ?? "add");
+        const text = String((event as any).text ?? "").trim();
+        const externalId =
+          String((event as any).id ?? "").trim() ||
+          (text ? `text:${sha256Hex(text)}` : `event:${sha256Hex(JSON.stringify(event))}`);
+        const status =
+          String((event as any).status ?? "").trim() ||
+          (op === "complete" ? "completed" : op === "add" ? "pending" : "in_progress");
+        const order = (event as any).order != null ? Number((event as any).order) : 0;
+        const description = String((event as any).description ?? "");
+        if (op === "remove") {
+          todoDeletes.push({ runId: body.runId as any, externalId });
+        } else {
+          todoRows.push({
+            runId: body.runId as any,
+            externalId,
+            text: text || "Todo",
+            description,
+            status,
+            order: Number.isFinite(order) ? order : 0,
+            createdAt: ts,
+            updatedAt: ts,
+          });
+        }
+      }
+
+      if (event.type === "artifact") {
+        const data =
+          (event as any).data && typeof (event as any).data === "object" ? (event as any).data : {};
+        const rawType = String((event as any).artifactType ?? data.type ?? data.artifactType ?? "");
+        const type = VALID_ARTIFACT_TYPES.has(rawType) ? rawType : "file";
+        const title = String((event as any).title ?? data.title ?? "Artifact");
+        const deliverableId = String((event as any).deliverableId ?? data.deliverableId ?? "").trim() || null;
+        const matched = matchDeliverable({
+          deliverables: deliverablesSpec,
+          artifactType: type,
+          artifactTitle: title,
+          deliverableId,
+        });
+        const deliverableKey = matched?.id
+          ? `id:${matched.id}`
+          : matched?.label
+          ? `label:${matched.label.trim().toLowerCase()}`
+          : null;
+        const contentRef =
+          String((event as any).contentRef ?? data.contentRef ?? data.ref ?? "").trim() || null;
+        const sha256 = String((event as any).sha256 ?? data.sha256 ?? "").trim() || null;
+        const mime = String((event as any).mime ?? data.mime ?? "").trim() || null;
+        const sizeVal = (event as any).size ?? data.size;
+        const size = sizeVal != null && Number.isFinite(Number(sizeVal)) ? Number(sizeVal) : null;
+
+        artifactRows.push({
+          runId: body.runId as any,
+          type: type as any,
+          title,
+          deliverableKey,
+          contentRef,
+          sha256,
+          mime,
+          size,
+          createdBy: "agent",
+          createdAt: ts,
+        });
+      }
+
+      if (event.type === "file") {
+        const opRaw = String((event as any).op ?? (event as any).action ?? "edited");
+        const op = VALID_FILE_OPS.has(opRaw) ? opRaw : "edited";
+        const path = String((event as any).path ?? (event as any).filePath ?? "");
+        if (path) {
+          const beforeContentRef =
+            String(
+              (event as any).beforeContentRef ??
+                (event as any).contentRefBefore ??
+                (event as any).data?.beforeContentRef ??
+                (event as any).data?.contentRefBefore ??
+                ""
+            ) || null;
+          const afterContentRef =
+            String(
+              (event as any).afterContentRef ??
+                (event as any).contentRefAfter ??
+                (event as any).data?.afterContentRef ??
+                (event as any).data?.contentRefAfter ??
+                ""
+            ) || null;
+          fileOpRows.push({
+            runId: body.runId as any,
+            op: op as any,
+            path,
+            beforeContentRef,
+            afterContentRef,
+            checkpointId: String((event as any).checkpointId ?? (event as any).data?.checkpointId ?? "") || null,
+            toolName: String((event as any).toolName ?? "") || null,
+            toolUseId: String((event as any).toolUseId ?? "") || null,
+            createdAt: ts,
+            payload: event,
+          });
+        }
+      }
+
+      if (event.type === "checkpoint") {
+        const checkpointId = String((event as any).checkpointId ?? (event as any).id ?? "").trim();
+        if (checkpointId) {
+          const opRaw = String((event as any).op ?? "create");
+          const status = opRaw === "restore" ? "restored" : opRaw === "drop" ? "dropped" : "created";
+          checkpointRows.push({
+            runId: body.runId as any,
+            provider: "claude_sdk",
+            providerCheckpointId: checkpointId,
+            status,
+            createdAt: ts,
+            payload: event,
+          });
+        }
+      }
+    }
+
+    if (todoRows.length) {
+      await tx
+        .insert(schema.todos)
+        .values(todoRows as any)
+        .onConflictDoUpdate({
+          target: [schema.todos.runId, schema.todos.externalId],
+          set: {
+            text: sql`excluded.${schema.todos.text}`,
+            description: sql`excluded.${schema.todos.description}`,
+            status: sql`excluded.${schema.todos.status}`,
+            order: sql`excluded.${schema.todos.order}`,
+            updatedAt: sql`excluded.${schema.todos.updatedAt}`,
+          } as any,
+        });
+    }
+
+    if (todoDeletes.length) {
+      for (const td of todoDeletes) {
+        await tx
+          .delete(schema.todos)
+          .where(and(eq(schema.todos.runId, td.runId), eq(schema.todos.externalId, td.externalId)));
+      }
+    }
+
+    if (artifactRows.length) {
+      const withContentRef = artifactRows.filter((a) => a.contentRef);
+      const noContentRef = artifactRows.filter((a) => !a.contentRef);
+
+      if (withContentRef.length) {
+        await tx
+          .insert(schema.artifacts)
+          .values(withContentRef as any)
+          .onConflictDoUpdate({
+            target: [schema.artifacts.runId, schema.artifacts.contentRef],
+            set: {
+              type: sql`excluded.${schema.artifacts.type}`,
+              title: sql`excluded.${schema.artifacts.title}`,
+              deliverableKey: sql`excluded.${schema.artifacts.deliverableKey}`,
+              sha256: sql`excluded.${schema.artifacts.sha256}`,
+              mime: sql`excluded.${schema.artifacts.mime}`,
+              size: sql`excluded.${schema.artifacts.size}`,
+            } as any,
+          });
+      }
+
+      if (noContentRef.length) {
+        await tx.insert(schema.artifacts).values(noContentRef as any);
+      }
+    }
+
+    if (fileOpRows.length) {
+      await tx.insert(schema.runFileOps).values(fileOpRows as any);
+    }
+
+    if (checkpointRows.length) {
+      await tx
+        .insert(schema.runCheckpoints)
+        .values(checkpointRows as any)
+        .onConflictDoUpdate({
+          target: [schema.runCheckpoints.runId, schema.runCheckpoints.providerCheckpointId],
+          set: {
+            status: sql`excluded.${schema.runCheckpoints.status}`,
+            payload: sql`excluded.${schema.runCheckpoints.payload}`,
+          } as any,
+        });
+    }
 
     return out;
   });

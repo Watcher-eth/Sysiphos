@@ -26,7 +26,7 @@ export type AgentEvent =
     | { type: "thinking"; text: string }
     | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; data?: any }
     | { type: "step"; status: "started" | "completed" | "failed"; name: string; detail?: string; data?: any }
-    | { type: "todo"; op: "add" | "update" | "complete"; id: string; text?: string; status?: string; data?: any }
+    | { type: "todo"; op: "add" | "update" | "complete" | "remove"; id: string; text?: string; status?: string; data?: any }
     | { type: "artifact"; name: string; contentRef: string; mime?: string; size?: number; sha256?: string; action?: string; path?: string }
     | { type: "result_text"; text: string }
     | { type: "raw"; provider: "claude"; payload: any }
@@ -70,7 +70,17 @@ export type CheckpointOp = CheckpointEvent["op"];
 
 export type SessionTurnResult = {
   sessionId?: string;
-  usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
+  usage?: {
+    messageId?: string;
+    tokensIn?: number;
+    tokensOut?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    totalCostUsd?: number;
+    modelUsage?: Record<string, any>;
+    costCredits?: number;
+    isFinal?: boolean;
+  };
   event?: AgentEvent;
   // legacy support (optional)
   text?: string;

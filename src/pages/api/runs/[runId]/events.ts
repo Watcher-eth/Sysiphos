@@ -1,9 +1,11 @@
 // src/pages/api/runs/events.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createHmac } from "node:crypto";
-import { and, eq, max } from "drizzle-orm";
+import { and, desc, eq, max } from "drizzle-orm";
 import { db, schema } from "@/lib/db";
 import { runEventsHub } from "@/lib/runs/eventHub";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 
 function stableJson(value: any): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -123,6 +125,56 @@ async function nextSeq(runId: string): Promise<number> {
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method === "GET") {
+    const session = await getServerSession(req, res, authOptions);
+    const userId = (session?.user as any)?.id as string | undefined;
+    if (!userId) return res.status(401).send("Unauthorized");
+
+    const runId = req.query.runId as string;
+    if (!runId) return res.status(400).send("Missing runId");
+
+    const runRow = await db
+      .select({ workspaceId: schema.runs.workspaceId })
+      .from(schema.runs)
+      .where(eq(schema.runs.id, runId as any))
+      .limit(1);
+
+    const run = runRow[0];
+    if (!run) return res.status(404).send("Run not found");
+
+    const membership = await db
+      .select({ userId: schema.workspaceMembers.userId })
+      .from(schema.workspaceMembers)
+      .where(
+        and(
+          eq(schema.workspaceMembers.workspaceId, run.workspaceId),
+          eq(schema.workspaceMembers.userId, userId as any)
+        )
+      )
+      .limit(1);
+
+    if (!membership[0]) return res.status(403).send("Forbidden");
+
+    const limit = req.query.limit != null ? Number(req.query.limit) : 500;
+    const rows = await db
+      .select({
+        id: schema.runEvents.id,
+        runId: schema.runEvents.runId,
+        seq: schema.runEvents.seq,
+        type: schema.runEvents.type,
+        action: schema.runEvents.action,
+        level: schema.runEvents.level,
+        payload: schema.runEvents.payload,
+        createdAt: schema.runEvents.createdAt,
+      })
+      .from(schema.runEvents)
+      .where(eq(schema.runEvents.runId, runId as any))
+      .orderBy(desc(schema.runEvents.seq))
+      .limit(Number.isFinite(limit) ? limit : 500);
+
+    return res.status(200).json({ ok: true, events: rows });
+  }
+
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   const secret = mustRunnerSecret();

@@ -116,6 +116,8 @@ export async function compileAndPersistRunProgram(params: {
 
     const task = tRow[0];
     if (!task) throw new Error("task_not_found");
+    const deliverablesSpecArr = (task.deliverablesSpec as any[]) ?? [];
+    if (!deliverablesSpecArr.length) throw new Error("task_missing_deliverables");
 
     compileInput = {
       kind: "task",
@@ -123,7 +125,7 @@ export async function compileAndPersistRunProgram(params: {
         id: String(task.id),
         title: String(task.title ?? ""),
         description: String(task.description ?? ""),
-        deliverablesSpec: (task.deliverablesSpec as any[]) ?? [],
+        deliverablesSpec: deliverablesSpecArr,
         contextSpec: (task.contextSpec as any[]) ?? [],
         mountsSpec: (task.mountsSpec as any[]) ?? [],
       },

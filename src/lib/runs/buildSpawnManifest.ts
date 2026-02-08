@@ -90,6 +90,16 @@ function asStrArr(v: any): string[] | undefined {
   return v.map(String).filter(Boolean);
 }
 
+function filterEnvByAllowlist(env: Record<string, string>, allowlist?: string[]) {
+  if (!allowlist || !allowlist.length) return env;
+  const allow = new Set(allowlist);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (allow.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 function asTools(v: any): ToolDefForModel[] | undefined {
   if (!Array.isArray(v)) return undefined;
   const out: ToolDefForModel[] = [];
@@ -180,7 +190,7 @@ export async function buildSpawnManifest(params: {
     .sort((a, b) => a.path.localeCompare(b.path));
 
   // 4) env/limits + tools/mcp from execSpec
-  const env: Record<string, string> = { ...(asObj(execSpec.env) ?? {}) };
+  const envBase: Record<string, string> = { ...(asObj(execSpec.env) ?? {}) };
 
   const limits = {
     wallClockMs: Number(execSpec?.limits?.wallClockMs ?? 60_000),
@@ -192,6 +202,33 @@ export async function buildSpawnManifest(params: {
   const mcpServers = asObj(execSpec.mcpServers);
   const permissionMode =
     typeof execSpec.permissionMode === "string" ? (execSpec.permissionMode as any) : undefined;
+
+  if (tools?.some((t) => t.name.startsWith("mcp__"))) {
+    throw new Error("invalid_tool_name_prefix_mcp");
+  }
+
+  const mcpServerNames = new Set(Object.keys(mcpServers ?? {}));
+  const mcpAllowlist = toolAllowlist.filter((n) => n.startsWith("mcp__"));
+  if (mcpAllowlist.length && mcpServerNames.size === 0) {
+    throw new Error("mcp_allowlist_without_servers");
+  }
+  for (const entry of mcpAllowlist) {
+    const m = entry.match(/^mcp__([^_]+)__/);
+    if (!m) continue;
+    const server = m[1];
+    if (server !== "*" && !mcpServerNames.has(server)) {
+      throw new Error(`mcp_allowlist_missing_server:${server}`);
+    }
+  }
+
+  const envAllowlist = asStrArr(execSpec.envAllowlist);
+  const env = filterEnvByAllowlist(envBase, envAllowlist);
+  const hasSensitiveEnv = Object.keys(env).some(
+    (k) => k.startsWith("INTEGRATION_") || k.startsWith("CONNECTOR_") || k.startsWith("OAUTH_")
+  );
+  if (hasSensitiveEnv && !capabilities.includes("connectors.use")) {
+    throw new Error("connectors_permission_required_for_env");
+  }
 
 
   const base: Omit<SpawnManifest, "manifestHash" | "manifestSig"> = {

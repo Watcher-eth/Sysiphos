@@ -34,7 +34,7 @@ export type PromptParts = {
       `\n<protocol>\n` +
       `You MUST emit realtime events using the @event prefix.\n\n` +
       `Allowed formats (each event MUST be exactly ONE line):\n` +
-      `1) @event todo {"op":"add|update|complete","id":"t1","text":"...","status":"not_started|in_progress|done","order":1,"description":"..."}\n` +
+      `1) @event todo {"op":"add|update|complete|remove","id":"t1","text":"...","status":"pending|in_progress|completed","order":1,"description":"..."}\n` +
       `2) @event step started {"name":"Plan|Execute|Verify|tool:XYZ","detail":"..."}\n` +
       `   @event step completed {"name":"...","detail":"..."}\n` +
       `   @event step failed {"name":"...","detail":"..."}\n` +
@@ -47,11 +47,10 @@ export type PromptParts = {
       `- For JSON payloads: must be valid JSON (double quotes, no trailing commas).\n` +
       `- Do NOT put @event lines inside <result>.\n` +
       `- Do NOT wrap @event lines in markdown code blocks.\n\n` +
-      `TODO REQUIREMENT (strict):\n` +
-      `- BEFORE ANY long text, emit AT LEAST 5 todo(add) events outlining your plan.\n` +
-      `- Use stable IDs: t1, t2, t3, t4, t5 (and t6+ if needed).\n` +
-      `- Orders must be 1..N and reflect execution order.\n` +
-      `- As you progress, emit todo(update/complete) events.\n\n` +
+      `TODO GUIDANCE:\n` +
+      `- Use todos for multi-step work (3+ distinct actions) or when the user requests tracking.\n` +
+      `- Create todos as pending, move to in_progress when started, completed when finished.\n` +
+      `- Remove todos when a group is fully completed.\n\n` +
       `Minimum step events:\n` +
       `- step started Plan\n` +
       `- step completed Plan\n` +

@@ -16,6 +16,7 @@ type ToolDefForModel = {
     permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
   
     env?: Record<string, string>;
+  envAllowlist?: string[];
     limits?: { wallClockMs?: number; maxFileBytes?: number; maxArtifactBytes?: number };
   };
   
@@ -40,6 +41,7 @@ type ToolDefForModel = {
   
     // env
     if (o.env && typeof o.env === "object") out.env = o.env;
+  if (Array.isArray(o.envAllowlist)) out.envAllowlist = o.envAllowlist.map(String).filter(Boolean);
   
     // ✅ migrate old enableToolSearch → env.ENABLE_TOOL_SEARCH
     if (typeof o.enableToolSearch === "string" && o.enableToolSearch.trim()) {

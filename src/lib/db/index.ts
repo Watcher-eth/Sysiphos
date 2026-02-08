@@ -4,8 +4,22 @@ import { Pool } from "pg";
 import * as schema from "./schema";
 
 
-const connectionString = process.env.DATABASE_URL!;
-if (!connectionString) throw new Error("DATABASE_URL missing");
+const rawConnectionString = process.env.DATABASE_URL!;
+if (!rawConnectionString) throw new Error("DATABASE_URL missing");
+
+const connectionString = (() => {
+  try {
+    const url = new URL(rawConnectionString);
+    const sslmode = url.searchParams.get("sslmode");
+    if (sslmode && sslmode !== "disable") {
+      // Let pg's ssl option control verification to avoid verify-full behavior.
+      url.searchParams.delete("sslmode");
+    }
+    return url.toString();
+  } catch {
+    return rawConnectionString;
+  }
+})();
 
 const isProd = process.env.NODE_ENV === "production";
 

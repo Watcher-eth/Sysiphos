@@ -452,6 +452,7 @@ export const runCheckpoints = pgTable(
           type: text("type").notNull().$type<ArtifactType>(),
           title: text("title").notNull(),
       
+      deliverableKey: text("deliverable_key"),
           contentRef: text("content_ref"), // <-- add this (matches protocol)
           sha256: text("sha256"),
           mime: text("mime"),
@@ -491,7 +492,7 @@ export const runCheckpoints = pgTable(
     })
   );
   
-  export type TodoStatus = "not_started" | "in_progress" | "done";
+export type TodoStatus = "pending" | "in_progress" | "completed";
   
   export const todos = pgTable(
     "todos",
@@ -502,7 +503,7 @@ export const runCheckpoints = pgTable(
       externalId: text("external_id"), // agent todo id like "t1"
       text: text("text").notNull(),
       description: text("description").notNull().default(""),
-      status: text("status").notNull().$type<TodoStatus>().default("not_started"),
+    status: text("status").notNull().$type<TodoStatus>().default("pending"),
       order: integer("order").notNull().default(0),
   
       createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

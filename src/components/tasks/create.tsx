@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/router";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowLeft,
@@ -456,6 +457,7 @@ function MiniCalendar({
 /* ───────────────── Main wizard ───────────────── */
 
 export default function CreateTaskWizardPage() {
+  const router = useRouter();
   const [step, setStep] = React.useState<StepId>("basics");
   const [dir, setDir] = React.useState<1 | -1>(1);
 
@@ -499,9 +501,53 @@ export default function CreateTaskWizardPage() {
     return list.slice().sort((a, b) => Number(b.connected) - Number(a.connected));
   }, [toolQuery]);
 
-  const submit = () => {
-    console.log("SUBMIT TASK", draft);
-    alert("Submitted (demo). Check console.");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  const submit = async () => {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const deliverablesSpec = draft.deliverables.map((d) => ({
+        id: d.id,
+        type: d.type,
+        label: d.label,
+        notes: d.notes ?? "",
+      }));
+
+      const contextSpec = [
+        { type: "process", items: draft.process },
+        { type: "todos", items: draft.todos },
+        { type: "integrations", items: draft.integrations },
+      ];
+
+      const mountsSpec = draft.locations.map((l) => ({
+        id: l.id,
+        type: l.type,
+        label: l.label,
+        value: l.value,
+      }));
+
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: draft.title,
+          description: draft.description,
+          deliverablesSpec,
+          contextSpec,
+          mountsSpec,
+          executionSpec: {},
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await res.json();
+      router.push("/tasks");
+    } catch (err: any) {
+      setSubmitError(String(err?.message ?? "Failed to submit task"));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -535,7 +581,13 @@ export default function CreateTaskWizardPage() {
 
                 <div className="mt-10 flex items-center justify-between">
                   <div className="text-[13px] text-neutral-400">
-                    {errors.length ? <span className="text-red-500">{errors[0]}</span> : <span> </span>}
+                    {errors.length ? (
+                      <span className="text-red-500">{errors[0]}</span>
+                    ) : submitError ? (
+                      <span className="text-red-500">{submitError}</span>
+                    ) : (
+                      <span> </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -562,6 +614,7 @@ export default function CreateTaskWizardPage() {
                         label="Submit task"
                         icon={<Check className="h-4 w-4" />}
                         onClick={submit}
+                        disabled={submitting}
                       />
                     )}
                   </div>

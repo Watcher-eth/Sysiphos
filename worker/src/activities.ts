@@ -65,7 +65,7 @@ export async function createTodo(args: { runId: string; text: string; order: num
       externalId: args.externalId ?? `wf_t${args.order}`,
       text: args.text,
       order: args.order,
-      status: "not_started",
+      status: "pending",
     } as any)
     // @ts-ignore
     .onConflictDoNothing({
@@ -111,11 +111,12 @@ export async function SpawnSessionAndWait(args: { runId: string; programHash: st
 export async function settleRunBilling(args: {
   runId: string;
   status: "succeeded" | "failed" | "canceled";
-  usage?: { costCredits?: number } | null;
+  usage?: { costCredits?: number; totalCostUsd?: number } | null;
 }) {
   const workspaceId = await getRunWorkspaceId(args.runId);
 
-  const usageCost = Number(args.usage?.costCredits ?? 1);
+  const usdCost = Number(args.usage?.totalCostUsd ?? 0);
+  const usageCost = Number(args.usage?.costCredits ?? (usdCost ? Math.ceil(usdCost) : 1));
   const actualCost = Math.max(0, usageCost);
 
   const settled = await settleRunHold({

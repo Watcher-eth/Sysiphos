@@ -281,10 +281,23 @@ function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
       }
     }
 
+    const messageId =
+      msg?.id ??
+      msg?.message_id ??
+      msg?.messageId ??
+      msg?.data?.id ??
+      msg?.data?.message_id ??
+      msg?.data?.messageId ??
+      undefined;
+
     const usage = msg?.usage
       ? {
+          messageId: messageId ? String(messageId) : undefined,
           tokensIn: msg.usage?.input_tokens ?? msg.usage?.inputTokens,
           tokensOut: msg.usage?.output_tokens ?? msg.usage?.outputTokens,
+          cacheReadInputTokens: msg.usage?.cache_read_input_tokens ?? msg.usage?.cacheReadInputTokens,
+          cacheCreationInputTokens:
+            msg.usage?.cache_creation_input_tokens ?? msg.usage?.cacheCreationInputTokens,
           costCredits: undefined,
         }
       : undefined;
@@ -295,6 +308,19 @@ function mapClaudeMessageToTurns(msg: ClaudeMessage): SessionTurnResult[] {
   if (msg?.type === "result") {
     const text = msg?.output_text ?? msg?.text ?? "";
     if (text) out.push({ sessionId: sid, text });
+
+    const totalCostUsd = msg?.usage?.total_cost_usd ?? msg?.usage?.totalCostUsd;
+    const modelUsage = msg?.model_usage ?? msg?.modelUsage ?? msg?.usage?.model_usage ?? msg?.usage?.modelUsage;
+    if (totalCostUsd != null || modelUsage) {
+      out.push({
+        sessionId: sid,
+        usage: {
+          totalCostUsd: totalCostUsd != null ? Number(totalCostUsd) : undefined,
+          modelUsage: modelUsage ?? undefined,
+          isFinal: true,
+        },
+      });
+    }
   }
 
   return out;

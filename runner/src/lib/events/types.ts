@@ -1,4 +1,3 @@
-import type { AgentEvent } from "../prose/sessionAdapter";
 
 export type AgentEventEnvelope = {
   v: 1;
@@ -9,9 +8,19 @@ export type AgentEventEnvelope = {
   sessionId?: string;
 
   // ✅ producer seq
-  sourceSeq: number;
+  seq: number;
 
   ts: string;
   event: any;
-  usage?: { tokensIn?: number; tokensOut?: number; costCredits?: number };
+  usage?: {
+    messageId?: string;
+    tokensIn?: number;
+    tokensOut?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    totalCostUsd?: number;
+    modelUsage?: Record<string, any>;
+    costCredits?: number;
+    isFinal?: boolean;
+  };
 };

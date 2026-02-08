@@ -97,7 +97,16 @@ function verifyManifestOrThrow(manifest: Manifest) {
 
 type ExecResult = {
   outputs: BindingRef[];
-  usage: { wallClockMs: number; tokensIn?: number; tokensOut?: number; costCredits?: number };
+  usage: {
+    wallClockMs: number;
+    tokensIn?: number;
+    tokensOut?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    totalCostUsd?: number;
+    modelUsage?: Record<string, any>;
+    costCredits?: number;
+  };
 };
 
 function s3BindingKey(runId: string, name: string) {
@@ -193,15 +202,6 @@ function artifactKey(ev: any): string | null {
   return null;
 }
 
-const MIN_TODOS = 5;
-const SYNTH_TODOS = [
-  "Gather context & constraints",
-  "Write a plan (steps + risks)",
-  "Execute the plan",
-  "Verify outputs & edge cases",
-  "Finalize result & next actions",
-];
-
 export async function executeProse(args: {
   manifest: Manifest;
   program: ProseProgram;
@@ -234,7 +234,15 @@ export async function executeProse(args: {
 
   eventBuf.start();
 
-  const usageAgg = { tokensIn: 0, tokensOut: 0, costCredits: 0 };
+  const usageAgg = {
+    tokensIn: 0,
+    tokensOut: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    totalCostUsd: 0,
+    costCredits: 0,
+    modelUsage: undefined as Record<string, any> | undefined,
+  };
 
 
   async function writeBinding(binding: BindingRef, contentText: string) {
@@ -377,22 +385,14 @@ export async function executeProse(args: {
     let didAnnounceSession = false;
     let lastResultTextFromEvents: string | undefined;
 
-    const todoAddIds = new Set<string>();
     const seenArtifacts = new Set<string>();
+    const seenUsageIds = new Set<string>();
 
     const handleEvent = (ev: any, usage?: any) => {
       if (!ev) return;
 
       if (ev.type === "session_started" || ev.type === "session_resumed") {
         didAnnounceSession = true;
-      }
-
-      if (isTodoAdd(ev)) {
-        if (typeof ev.id === "string" && ev.id) {
-          todoAddIds.add(ev.id);
-        } else if (typeof ev.text === "string" && ev.text.trim()) {
-          todoAddIds.add(`text:${ev.text.trim()}`);
-        }
       }
 
       if (ev.type === "artifact") {
@@ -427,32 +427,27 @@ export async function executeProse(args: {
         if (msg.event) handleEvent(msg.event, msg.usage);
         if (msg.text) full += msg.text;
 
-        usageAgg.tokensIn += msg.usage?.tokensIn ?? 0;
-        usageAgg.tokensOut += msg.usage?.tokensOut ?? 0;
-        usageAgg.costCredits += msg.usage?.costCredits ?? 0;
+        if (msg.usage) {
+          const messageId = msg.usage.messageId;
+          if (!messageId || !seenUsageIds.has(messageId)) {
+            if (messageId) seenUsageIds.add(messageId);
+            usageAgg.tokensIn += msg.usage.tokensIn ?? 0;
+            usageAgg.tokensOut += msg.usage.tokensOut ?? 0;
+            usageAgg.cacheReadInputTokens += msg.usage.cacheReadInputTokens ?? 0;
+            usageAgg.cacheCreationInputTokens += msg.usage.cacheCreationInputTokens ?? 0;
+          }
+
+          if (msg.usage.totalCostUsd != null) {
+            usageAgg.totalCostUsd = Math.max(usageAgg.totalCostUsd, Number(msg.usage.totalCostUsd));
+          }
+          if (msg.usage.modelUsage) usageAgg.modelUsage = msg.usage.modelUsage;
+          if (msg.usage.costCredits != null) usageAgg.costCredits += msg.usage.costCredits ?? 0;
+        }
       }
     } finally {
       try {
         session.close();
       } catch {}
-    }
-
-    if (todoAddIds.size < MIN_TODOS) {
-      const sid = latestSessionId;
-      const synthPrefix = `synth:${agentName}:${sid ?? "nosid"}`;
-      for (let i = 0; i < MIN_TODOS; i++) {
-        handleEvent(
-          {
-            type: "todo",
-            op: "add",
-            id: `${synthPrefix}:t${i + 1}`,
-            text: SYNTH_TODOS[i] ?? `Task ${i + 1}`,
-            status: "not_started",
-            data: { synthetic: true },
-          } as any,
-          undefined
-        );
-      }
     }
 
     const fallback = extractResultText(full);
@@ -581,6 +576,10 @@ export async function executeProse(args: {
       wallClockMs,
       tokensIn: usageAgg.tokensIn || undefined,
       tokensOut: usageAgg.tokensOut || undefined,
+      cacheReadInputTokens: usageAgg.cacheReadInputTokens || undefined,
+      cacheCreationInputTokens: usageAgg.cacheCreationInputTokens || undefined,
+      totalCostUsd: usageAgg.totalCostUsd || undefined,
+      modelUsage: usageAgg.modelUsage ?? undefined,
       costCredits: usageAgg.costCredits || undefined,
     },
   };

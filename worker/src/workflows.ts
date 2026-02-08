@@ -6,7 +6,7 @@ import type * as acts from "./activities";
 export type ProseRunArgs = { runId: string; programHash: string };
 type RunFinalStatus = "succeeded" | "failed" | "canceled";
 
-const { setRunStatus, writeEvent, createTodo, settleRunBilling, SpawnSessionAndWait } =
+const { setRunStatus, writeEvent, settleRunBilling, SpawnSessionAndWait } =
   wf.proxyActivities<typeof acts>({
     startToCloseTimeout: "10m",
     retry: { maximumAttempts: 3 },
@@ -28,10 +28,6 @@ export async function ProseRunWorkflow({ runId, programHash }: ProseRunArgs) {
     principalId: "system",
     event: { type: "RUN_STATUS", status: "running" }, // or {type:"log"...}; mapper can handle either
   });
-
-  await createTodo({ runId, order: 0, text: "Collect context + constraints", externalId: "wf:t1" });
-  await createTodo({ runId, order: 1, text: "Execute task plan", externalId: "wf:t2" });
-  await createTodo({ runId, order: 2, text: "Write deliverables + finalize", externalId: "wf:t3" });
 
   let finalStatus: RunFinalStatus = "failed";
   let usage: any = null;
