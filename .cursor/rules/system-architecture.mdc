@@ -1,0 +1,27 @@
+---
+description: System architecture mental model for workflow runner
+alwaysApply: true
+---
+
+# System Architecture Mental Model
+- Control plane (Next.js) is source of truth: auth/tenancy, run lifecycle APIs, DB persistence, event ingestion, signed SpawnManifest.
+- Worker (Temporal) orchestrates runs: workflows + activities call runner/control plane with retries/timeouts.
+- Runner executes pinned runs: materialize manifest, verify hash+HMAC, run Prose VM, stream events.
+
+# Run Invariants
+- `runs.programHash` must match `run_programs.programHash`.
+- Execution inputs are pinned: programText+hash, executionSpec snapshot, permissions allowlist, run_files refs.
+- Manifest integrity (hash + HMAC signature) is required before execution.
+
+# Tooling & MCP Gating
+- Allowlist is authoritative for tool use (run_permissions capability=tools.use).
+- MCP is enabled only when allowlist contains at least one `mcp__*` entry.
+- Tool search is controlled solely via `env.ENABLE_TOOL_SEARCH`.
+
+# Repo Map
+- Control plane: `src/pages/api/runs/*`, `src/lib/runs/*`, `src/lib/prose/*`, `src/lib/db/schema.ts`, `src/lib/billing/*`.
+- Worker: `worker/src/workflows.ts`, `worker/src/activities.ts`, `worker/src/*Client.ts`.
+- Runner: `runner/src/materialize.ts`, `runner/src/lib/prose/*`, `runner/src/lib/events/*`, `runner/src/s3.ts`.
+
+# Product Loop
+- Define tasks/workflows → create run → compile/pin → start Temporal → runner executes → events/artifacts → review/rerun.

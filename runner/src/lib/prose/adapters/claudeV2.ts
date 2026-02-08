@@ -536,7 +536,7 @@ class ClaudeSessionHandle implements SessionHandle {
   private userText: string | null = null;
 
   constructor(
-    private readonly args: SessionCreateArgs & { resumeSessionId?: string; enableToolSearch?: string },
+    private readonly args: SessionCreateArgs & { resumeSessionId?: string },
     private readonly model?: string
   ) {}
 
@@ -625,7 +625,6 @@ class ClaudeSessionHandle implements SessionHandle {
       
         // ✅ MCP passthrough (already derived in runtime)
         ...(self.args.mcpServers ? { mcpServers: self.args.mcpServers } : {}),
-        ...(self.args.allowedTools ? { allowedTools: self.args.allowedTools } : {}),
         ...(self.args.permissionMode ? { permissionMode: self.args.permissionMode } : {}),
       
         // ✅ env passed once; includes ENABLE_TOOL_SEARCH if you want it
@@ -647,7 +646,7 @@ class ClaudeSessionHandle implements SessionHandle {
             }
           : {}),
       };
-      
+
       const resp = query({ prompt: promptStreamFromText(prompt), options });
 
       let carry = "";

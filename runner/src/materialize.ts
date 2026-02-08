@@ -57,6 +57,7 @@ type Manifest = {
       permissionMode: m.permissionMode ?? null,
     };
   }
+  
 function stableJson(value: any): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;

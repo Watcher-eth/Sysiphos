@@ -193,11 +193,7 @@ export async function buildSpawnManifest(params: {
   const permissionMode =
     typeof execSpec.permissionMode === "string" ? (execSpec.permissionMode as any) : undefined;
 
-  // ✅ tool search only via env
-  // if you previously used execSpec.enableToolSearch, migrate it here:
-  if (typeof execSpec.enableToolSearch === "string" && execSpec.enableToolSearch.trim()) {
-    env.ENABLE_TOOL_SEARCH = String(execSpec.enableToolSearch).trim();
-  }
+
   const base: Omit<SpawnManifest, "manifestHash" | "manifestSig"> = {
     runId,
     programHash,

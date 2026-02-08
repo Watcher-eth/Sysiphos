@@ -131,8 +131,6 @@ export type SessionCreateArgs = {
 
   // ✅ MCP + permissions (new spec)
   mcpServers?: Record<string, any>;
-  allowedTools?: string[];
-  disallowedTools?: string[];
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
 
   // ✅ SDK env passthrough (ENABLE_TOOL_SEARCH etc)

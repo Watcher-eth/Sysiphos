@@ -1,0 +1,26 @@
+---
+description: Product spec and positioning for workflow runner
+alwaysApply: true
+---
+
+# Product Vision
+- Build a Claude/Codex-style workflow runner for non-dev work.
+- Users define Tasks and Workflows that produce concrete Deliverables (docs/sheets/emails/files).
+- System executes specs with agents, streams progress, stores outputs as artifacts, and supports review → comment → rerun.
+
+# Core Objects
+- Task: reusable definition with executionSpec, deliverablesSpec, contextSpec, mountsSpec.
+- Workflow: versioned program template (`workflow_versions`) for immutable runs.
+- Run: execution instance pinned to programText+hash, executionSpec snapshot, permissions allowlist, run_files.
+- Artifact: output stored by content ref (object storage), linked to runs.
+
+# Rerun Modes
+- Replay: exact pinned program/spec for reproducibility.
+- Latest: newest task/workflow settings for iteration.
+
+# Execution Guarantees
+- Pinned inputs define determinism: programHash+text, executionSpec snapshot, permissions, files.
+- Signed manifest ensures tamper resistance in transit.
+
+# Positioning (One-Liner)
+- Workflow OS for business tasks: define tasks with tools/integrations, run agents for deliverables, review/comment/rerun until perfect.

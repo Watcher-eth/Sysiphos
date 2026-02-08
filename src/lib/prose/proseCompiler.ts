@@ -27,10 +27,7 @@ export type ReviewNote = {
 export type ExecutionSpec = {
   tools?: Array<{ name: string; description?: string; input_schema?: any }>;
   mcpServers?: Record<string, any>;
-  allowedTools?: string[];
-  disallowedTools?: string[];
   permissionMode?: "default" | "acceptEdits" | "bypassPermissions" | string;
-  enableToolSearch?: string;
   env?: Record<string, string>;
   limits?: { wallClockMs?: number; maxFileBytes?: number; maxArtifactBytes?: number };
 };
